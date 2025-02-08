@@ -1,0 +1,26 @@
+[workspace]
+members = ["common", "client", "server", "rpc"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.3", features = ["derive"] }
+console-subscriber = "0.4.1"
+prost = "0.13.4"
+rustyline = "15.0.0"
+serde = { version = "1.0", features = ["derive", "rc"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12.3"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+tracing-opentelemetry = "0.28"
+tracing-subscriber = { version = "0.3" }
+
+# Local crates
+common = { path = "./common" }
+client = { path = "./client" }
+server = { path = "./server" }
+rpc = { path = "./rpc" }

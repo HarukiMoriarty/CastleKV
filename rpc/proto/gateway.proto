@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package gateway;
+
+service Db {
+  // This is the main entry point for the client. It sends a command
+  // to the server and return the result.
+  rpc ConnectExecutor(stream Command) returns (stream CommandResult) {}
+  // This is used by the traditional concurrency controls where a server
+  // connects to another server to execute a plan. The sending server
+  // acts like a client to the receiving server, but it sends a plan
+  // instead of a command.
+  // rpc ConnectPeerExecutor(stream Plan) returns (stream CommandResult) {}
+}
+
+// A command is a list of operations to be executed atomically. It is 
+// sent by the client to the server. Many commands may be grouped into
+// a trasaction.
+message Command {
+  repeated Operation ops = 1;
+}
+
+message Operation {
+  uint32 id = 1;
+  string name = 2;
+  repeated string args = 3;
+}
+
+// Result of command execution
+message CommandResult {
+  repeated OperationResult ops = 1;
+  Status status = 2;
+  string content = 3;
+  bool has_err = 4;
+}
+
+message OperationResult {
+  uint32 id = 1;
+  string content = 2;
+  bool has_err = 3;
+}
+
+enum Status {
+  ABORTED = 0;
+  COMMITTED = 1;
+}
