@@ -17,7 +17,8 @@ service Db {
 // sent by the client to the server. Many commands may be grouped into
 // a trasaction.
 message Command {
-  repeated Operation ops = 1;
+  uint64 cmd_id = 1;
+  repeated Operation ops = 2;
 }
 
 message Operation {
@@ -28,10 +29,11 @@ message Operation {
 
 // Result of command execution
 message CommandResult {
-  repeated OperationResult ops = 1;
-  Status status = 2;
-  string content = 3;
-  bool has_err = 4;
+  uint64 cmd_id = 1;
+  repeated OperationResult ops = 2;
+  Status status = 3;
+  string content = 4;
+  bool has_err = 5;
 }
 
 message OperationResult {

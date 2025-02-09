@@ -1,7 +1,7 @@
 mod id;
 mod session;
 
-pub use id::{CommandId, NodeId, TransactionId};
+pub use id::{CommandId, NodeId};
 pub use session::Session;
 
 pub fn init_tracing() {

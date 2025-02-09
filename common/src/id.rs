@@ -65,10 +65,10 @@ impl NodeId {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TransactionId(NodeId, u32);
+pub struct CommandId(NodeId, u32);
 
-impl TransactionId {
-    pub const INVALID: TransactionId = Self(NodeId(0), 0);
+impl CommandId {
+    pub const INVALID: CommandId = Self(NodeId(0), 0);
 
     pub fn new(node_id: NodeId, counter: u32) -> Self {
         Self(node_id, counter)
@@ -83,25 +83,25 @@ impl TransactionId {
     }
 }
 
-impl fmt::Debug for TransactionId {
+impl fmt::Debug for CommandId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TxnId({},{})", self.0, self.1)
     }
 }
 
-impl fmt::Display for TransactionId {
+impl fmt::Display for CommandId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({},{})", self.0, self.1)
     }
 }
 
-impl Serialize for TransactionId {
+impl Serialize for CommandId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
 
-impl From<u64> for TransactionId {
+impl From<u64> for CommandId {
     fn from(raw: u64) -> Self {
         Self(
             NodeId((raw & 0xFFFF_FFFF) as u32),
@@ -110,30 +110,28 @@ impl From<u64> for TransactionId {
     }
 }
 
-impl From<TransactionId> for u64 {
-    fn from(txn_id: TransactionId) -> Self {
-        (txn_id.1 as u64) << NodeId::BIT_LENGTH | ((txn_id.0).0 as u64)
+impl From<CommandId> for u64 {
+    fn from(cmd_id: CommandId) -> Self {
+        (cmd_id.1 as u64) << NodeId::BIT_LENGTH | ((cmd_id.0).0 as u64)
     }
 }
-
-pub type CommandId = u64;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_txn_id() {
-        let txn_id = TransactionId::new(NodeId(1), 2);
-        assert_eq!(txn_id.node_id(), NodeId(1));
-        assert_eq!(txn_id.counter(), 2);
-        assert_eq!(txn_id.to_string(), "(1,2)");
-        assert_eq!(u64::from(txn_id), 0x0000_0002_0000_0001);
+    fn test_cmd_id() {
+        let cmd_id = CommandId::new(NodeId(1), 2);
+        assert_eq!(cmd_id.node_id(), NodeId(1));
+        assert_eq!(cmd_id.counter(), 2);
+        assert_eq!(cmd_id.to_string(), "(1,2)");
+        assert_eq!(u64::from(cmd_id), 0x0000_0002_0000_0001);
 
-        let txn_id = TransactionId::from(0x0000_0002_0000_0001);
-        assert_eq!(txn_id.node_id(), NodeId(1));
-        assert_eq!(txn_id.counter(), 2);
-        assert_eq!(txn_id.to_string(), "(1,2)");
-        assert_eq!(u64::from(txn_id), 0x0000_0002_0000_0001);
+        let cmd_id = CommandId::from(0x0000_0002_0000_0001);
+        assert_eq!(cmd_id.node_id(), NodeId(1));
+        assert_eq!(cmd_id.counter(), 2);
+        assert_eq!(cmd_id.to_string(), "(1,2)");
+        assert_eq!(u64::from(cmd_id), 0x0000_0002_0000_0001);
     }
 }

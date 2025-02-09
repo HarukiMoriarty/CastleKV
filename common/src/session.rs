@@ -1,4 +1,4 @@
-use crate::metadata;
+use crate::{metadata, CommandId};
 use anyhow::{bail, ensure};
 use rpc::gateway::db_client::DbClient;
 use rpc::gateway::{Command, CommandResult, Operation, Status};
@@ -63,7 +63,10 @@ impl Session {
     /// command is already in progress, return an error.
     pub fn new_command(&mut self) -> anyhow::Result<&mut Self> {
         ensure!(self.cmd.is_none(), "must finish previous command first");
-        self.cmd = Some(Command { ops: vec![] });
+        self.cmd = Some(Command {
+            cmd_id: CommandId::INVALID.into(),
+            ops: vec![],
+        });
 
         Ok(self)
     }
