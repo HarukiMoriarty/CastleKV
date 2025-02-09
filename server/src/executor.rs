@@ -1,4 +1,4 @@
-use rpc::gateway::{Command, CommandResult, Status};
+use rpc::gateway::{Command, CommandResult, OperationResult, Status};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -6,6 +6,7 @@ use tokio_stream::StreamExt;
 use tonic::Streaming;
 use tracing::{debug, warn};
 
+use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
 use common::CommandId;
 
@@ -23,14 +24,20 @@ pub struct Executor {
     rx: ExecutorReceiver,
     lock_manager_tx: LockManagerSender,
     cmd_cnt: Arc<AtomicU64>,
+    db: Arc<KeyValueDb>,
 }
 
 impl Executor {
-    pub fn new(rx: ExecutorReceiver, lock_manager_tx: LockManagerSender) -> Self {
+    pub fn new(
+        rx: ExecutorReceiver,
+        lock_manager_tx: LockManagerSender,
+        db: Arc<KeyValueDb>,
+    ) -> Self {
         Self {
             rx,
             lock_manager_tx,
             cmd_cnt: Arc::new(AtomicU64::new(1)),
+            db,
         }
     }
 
@@ -42,6 +49,7 @@ impl Executor {
 
                     let lock_manager_tx = self.lock_manager_tx.clone();
                     let cmd_cnt = Arc::clone(&self.cmd_cnt);
+                    let db = Arc::clone(&self.db);
 
                     tokio::spawn(async move {
                         let mut stream = stream;
@@ -80,19 +88,30 @@ impl Executor {
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
                                             // Locks acquired successfully
-                                            let result = CommandResult {
-                                                cmd_id: cmd_id.into(),
-                                                ops: vec![],
-                                                status: Status::Committed as i32,
-                                                content: "Operation successful".to_string(),
-                                                has_err: false,
-                                            };
+                                            let mut ops_results = Vec::new();
+
+                                            for op in cmd.ops.iter() {
+                                                // Execute operation on the database
+                                                let op_result = db.execute(&op);
+
+                                                ops_results.push(OperationResult {
+                                                    id: op.id,
+                                                    content: op_result,
+                                                    has_err: false,
+                                                });
+                                            }
 
                                             // Release locks after operation
                                             let _ = lock_manager_tx
                                                 .send(LockManagerMessage::ReleaseLocks { cmd_id });
 
-                                            result
+                                            CommandResult {
+                                                cmd_id: cmd_id.into(),
+                                                ops: ops_results,
+                                                status: Status::Committed as i32,
+                                                content: "Operation successful".to_string(),
+                                                has_err: false,
+                                            }
                                         }
                                         Ok(false) => {
                                             // Command was aborted due to conflict

@@ -1,10 +1,14 @@
+mod database;
 mod executor;
 mod gateway;
 mod lock_manager;
 
+use database::KeyValueDb;
 use executor::Executor;
 use gateway::GatewayService;
 use lock_manager::LockManager;
+
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -13,7 +17,8 @@ pub async fn run_server(addr: String) -> Result<(), Box<dyn std::error::Error>> 
     let (lock_mananger_tx, lock_manager_rx) = mpsc::unbounded_channel();
 
     // Start executor.
-    let executor = Executor::new(executor_rx, lock_mananger_tx);
+    let db = Arc::new(KeyValueDb::new());
+    let executor = Executor::new(executor_rx, lock_mananger_tx, db);
     tokio::spawn(executor.run());
     info!("Started executor");
 
