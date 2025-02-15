@@ -15,9 +15,6 @@ struct Cli {
         help = "The address to connect to."
     )]
     connect_addr: String,
-
-    #[arg(long, default_value = "1", help = "The number of clients")]
-    nclient: usize,
 }
 
 #[tokio::main]
@@ -27,7 +24,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // For now, we'll just use single client
     let address = format!("http://{}", cli.connect_addr);
     let mut session = Session::remote("terminal", address).await?;
 
