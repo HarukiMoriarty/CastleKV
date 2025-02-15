@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         match tokens[0].to_uppercase().as_str() {
-            "PUT" | "SCAN" => {
+            "PUT" | "SCAN" | "SWAP" => {
                 if tokens.len() != 3 {
                     error!("PUT <key> <value>");
                     continue;
