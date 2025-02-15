@@ -3,16 +3,21 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LockMode {
     Shared,
     Exclusive,
+    #[default]
     Unlocked,
 }
 
 impl LockMode {
     fn conflict_with(&self, other: LockMode) -> bool {
-        !matches!((self, other), (LockMode::Shared, LockMode::Shared))
+        match self {
+            LockMode::Shared => other == LockMode::Exclusive,
+            LockMode::Exclusive => true,
+            LockMode::Unlocked => false,
+        }
     }
 }
 
@@ -41,7 +46,7 @@ pub enum LockManagerMessage {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Lock {
     mode: LockMode,
     owners: Vec<CommandId>,
@@ -49,14 +54,6 @@ struct Lock {
 }
 
 impl Lock {
-    fn new(mode: LockMode, owner: CommandId) -> Self {
-        Self {
-            mode,
-            owners: vec![owner],
-            waiters: VecDeque::new(),
-        }
-    }
-
     fn acquire_lock(&mut self, cmd_id: CommandId, lock_mode: LockMode) -> AcquireLockResult {
         let mut aborted_cmds = Vec::new();
 
@@ -271,19 +268,21 @@ impl LockManager {
                         let lock = self
                             .locks
                             .entry(key.clone())
-                            .or_insert_with(|| Lock::new(*mode, cmd_id));
-
+                            .or_insert_with(|| Lock::default());
+                        debug!("Lock {lock:?}");
                         match lock.acquire_lock(cmd_id, *mode) {
                             AcquireLockResult::Acquired {
                                 other_owners,
                                 aborted_cmds,
                             } => {
+                                debug!("Acquired lock {key:?}: other owners {other_owners:?}, aborted cmds {aborted_cmds:?}");
                                 acquired_keys.push(key.clone());
                                 all_aborted_cmds.extend(aborted_cmds);
                                 // Handle other owners that got granted this lock
                                 self.handle_new_owners(key, other_owners);
                             }
                             AcquireLockResult::Waiting { aborted_cmds } => {
+                                debug!("Waiting lock {key:?}: aborted cmds {aborted_cmds:?}");
                                 all_aborted_cmds.extend(aborted_cmds);
                                 all_acquired = false;
                                 break;
