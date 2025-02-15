@@ -85,7 +85,7 @@ impl CommandId {
 
 impl fmt::Debug for CommandId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TxnId({},{})", self.0, self.1)
+        write!(f, "CmdId({},{})", self.0, self.1)
     }
 }
 

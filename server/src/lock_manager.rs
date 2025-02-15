@@ -156,6 +156,7 @@ impl Lock {
 
         // If no one is waiting, return immediately
         if self.waiters.is_empty() {
+            self.mode = LockMode::Unlocked;
             return vec![];
         }
 
@@ -313,7 +314,7 @@ impl LockManager {
                 }
 
                 LockManagerMessage::ReleaseLocks { cmd_id } => {
-                    debug!("Releasing all locks for txn {}", cmd_id);
+                    debug!("Releasing all locks for cmd {}", cmd_id);
                     if let Some(cmd_acquired_keys) = self.cmd_acquired_keys.remove(&cmd_id) {
                         for key in cmd_acquired_keys {
                             if let Some(lock) = self.locks.get_mut(&key) {

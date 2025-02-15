@@ -1,4 +1,5 @@
-use rpc::gateway::{Command, CommandResult, OperationResult, Status};
+use rpc::gateway::{Command, CommandResult, Operation, OperationResult, Status};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -58,14 +59,14 @@ impl Executor {
                                 Ok(cmd) => {
                                     debug!("Command details: {:?}", cmd);
 
-                                    let lock_requests = cmd
-                                        .ops
-                                        .iter()
-                                        .map(|op| {
-                                            let mode = LockMode::Exclusive;
-                                            (op.name.clone(), mode)
-                                        })
-                                        .collect::<Vec<_>>();
+                                    let (read_set, write_set) = Self::calculate_rw_set(&cmd.ops);
+                                    let mut lock_requests = Vec::new();
+                                    for key in read_set {
+                                        lock_requests.push((key, LockMode::Shared));
+                                    }
+                                    for key in write_set {
+                                        lock_requests.push((key, LockMode::Exclusive));
+                                    }
 
                                     let (lock_resp_tx, lock_resp_rx) = oneshot::channel();
                                     let cmd_id =
@@ -152,5 +153,52 @@ impl Executor {
                 }
             }
         }
+    }
+
+    fn calculate_rw_set(ops: &[Operation]) -> (HashSet<String>, HashSet<String>) {
+        let mut read_set = HashSet::new();
+        let mut write_set = HashSet::new();
+
+        for op in ops {
+            match op.name.to_uppercase().as_str() {
+                "PUT" | "SWAP" | "DELETE" => {
+                    if op.args.len() >= 2 {
+                        if read_set.contains(&op.args[0]) {
+                            read_set.remove(&op.args[0]);
+                        }
+                        write_set.insert(op.args[0].clone());
+                    }
+                }
+                "GET" => {
+                    if op.args.len() >= 2 {
+                        if !write_set.contains(&op.args[0]) {
+                            read_set.insert(op.args[0].clone());
+                        }
+                    }
+                }
+                "SCAN" => {
+                    if op.args.len() >= 2 {
+                        if let (Some(start_num), Some(end_num)) = (
+                            Self::extract_key_number(&op.args[0]),
+                            Self::extract_key_number(&op.args[1]),
+                        ) {
+                            for num in start_num..=end_num {
+                                if !write_set.contains(&format!("key{}", num)) {
+                                    read_set.insert(format!("key{}", num));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => panic!("Unsupported operation: {}", op.name),
+            }
+        }
+
+        (read_set, write_set)
+    }
+
+    fn extract_key_number(key: &str) -> Option<u32> {
+        key.strip_prefix("key")
+            .and_then(|num_str| num_str.parse().ok())
     }
 }
