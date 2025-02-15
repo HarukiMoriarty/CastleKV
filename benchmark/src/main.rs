@@ -11,13 +11,10 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "http://0.0.0.0:23000",
+        default_value = "0.0.0.0:23000",
         help = "The address to connect to."
     )]
     connect_addr: String,
-
-    #[arg(long, default_value = "1", help = "The number of clients")]
-    nclient: usize,
 }
 
 #[tokio::main]
@@ -27,8 +24,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // For now, we'll just use single client
-    let mut session = Session::remote("terminal", cli.connect_addr).await?;
+    let address = format!("http://{}", cli.connect_addr);
+    let mut session = Session::remote("terminal", address).await?;
 
     // Read from stdin
     let stdin = io::stdin();

@@ -12,7 +12,7 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "http://0.0.0.0:23000",
+        default_value = "0.0.0.0:23000",
         help = "The address to connect to."
     )]
     connect_addr: String,
@@ -27,7 +27,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let mut session = Session::remote("terminal", cli.connect_addr).await?;
+    let address = format!("http://{}", cli.connect_addr);
+    let mut session = Session::remote("terminal", address).await?;
     let mut measure_time = false;
 
     loop {
