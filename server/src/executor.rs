@@ -183,8 +183,8 @@ impl Executor {
                             Self::extract_key_number(&op.args[1]),
                         ) {
                             for num in start_num..=end_num {
-                                if !write_set.contains(&format!("key{}", num)) {
-                                    read_set.insert(format!("key{}", num));
+                                if !write_set.contains(&format!("usertable_user{}", num)) {
+                                    read_set.insert(format!("usertable_user{}", num));
                                 }
                             }
                         }
@@ -198,7 +198,7 @@ impl Executor {
     }
 
     fn extract_key_number(key: &str) -> Option<u32> {
-        key.strip_prefix("key")
+        key.strip_prefix("usertable_user")
             .and_then(|num_str| num_str.parse().ok())
     }
 }

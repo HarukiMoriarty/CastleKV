@@ -222,6 +222,7 @@ impl LockManager {
 
     fn handle_new_owners(&mut self, key: &str, new_owners: Vec<CommandId>) {
         for owner_id in new_owners {
+            debug!("{owner_id:?} gain lock {key:?}");
             // Add this key to their acquired locks
             self.cmd_acquired_keys
                 .entry(owner_id)
@@ -233,6 +234,7 @@ impl LockManager {
                 *count -= 1;
                 // If they've gotten all their keys, notify them
                 if *count == 0 {
+                    debug!("Notify {owner_id:?}");
                     if let Some(channels) = self.cmd_channels.remove(&owner_id) {
                         for resp in channels {
                             let _ = resp.send(true);
@@ -309,6 +311,8 @@ impl LockManager {
                     } else {
                         // Store response channel for waiting
                         self.cmd_channels.entry(cmd_id).or_default().push(resp_tx);
+                        *self.cmd_waiting_keys.entry(cmd_id).or_default() +=
+                            lock_requests.len() - acquired_keys.len();
                     }
                 }
 
