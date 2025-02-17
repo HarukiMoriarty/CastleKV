@@ -83,7 +83,7 @@ fn tokenize(line: &str) -> Vec<String> {
 }
 
 async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> String {
-    const MAX_RETRIES: u32 = 3;
+    const MAX_RETRIES: u32 = 10;
     let mut retries = 0;
 
     loop {
@@ -92,11 +92,11 @@ async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> S
         match handle_result(session.finish_command().await) {
             Ok(output) if output == "Aborted" && retries < MAX_RETRIES => {
                 retries += 1;
-                error!("Command aborted, retry {}/{}", retries, MAX_RETRIES);
+                // error!("Command aborted, retry {}/{}", retries, MAX_RETRIES);
                 continue;
             }
             Ok(output) if output == "Aborted" => {
-                panic!("Command still aborted after {} retries", MAX_RETRIES);
+                // panic!("Command still aborted after {} retries", MAX_RETRIES);
             }
             Ok(output) => return output,
             Err(e) => panic!("{}", e),
