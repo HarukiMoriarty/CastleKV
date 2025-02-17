@@ -126,7 +126,7 @@ impl Executor {
                                                 status: Status::Aborted as i32,
                                                 content: "Command aborted due to conflict"
                                                     .to_string(),
-                                                has_err: true,
+                                                has_err: false,
                                             }
                                         }
                                         Err(_) => {
