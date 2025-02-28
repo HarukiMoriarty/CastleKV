@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a distributed key-value store.
+This ongoing project implements a distributed key-value store for CS739 Distributed System of UW Madison.
 
 ## Supported Operations
 
@@ -21,7 +21,7 @@ The key-value store supports the following operations:
 cargo run --release --bin server --$(config)
 ```
 
-### Running the Client
+### Running the Client (Terminal Interaction)
 ```bash
 cargo run --release --bin client --$(config)
 ```
