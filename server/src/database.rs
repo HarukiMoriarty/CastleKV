@@ -1,17 +1,36 @@
 use rpc::gateway::Operation;
+use sled::Db;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone)]
 pub struct KeyValueDb {
-    data: Arc<RwLock<BTreeMap<String, String>>>,
+    memory_db: Arc<RwLock<BTreeMap<String, String>>>,
+    persistent_db: Db,
 }
 
 impl KeyValueDb {
-    pub fn new() -> Self {
-        Self {
-            data: Arc::new(RwLock::new(BTreeMap::new())),
+    pub fn new(db_path: impl AsRef<Path>) -> Result<Self, sled::Error> {
+        let persistent_db = sled::open(db_path)?;
+        let memory_db = Arc::new(RwLock::new(BTreeMap::new()));
+
+        // Load existing data from persistent storage into memory
+        {
+            let mut memory_cache = memory_db.write().unwrap();
+            for result in persistent_db.iter() {
+                if let Ok((key, value)) = result {
+                    let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
+                    let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
+                    memory_cache.insert(key_str, value_str);
+                }
+            }
         }
+
+        Ok(Self {
+            memory_db,
+            persistent_db,
+        })
     }
 
     pub fn execute(&self, op: &Operation) -> String {
@@ -30,12 +49,12 @@ impl KeyValueDb {
             panic!("PUT requires 2 arguments");
         }
 
-        let mut data = self.data.write().unwrap();
-        let key = op.args[0].clone();
-        let value = op.args[1].clone();
+        let mut memory_db = self.memory_db.write().unwrap();
+        let key = &op.args[0];
+        let value = &op.args[1];
 
-        let found = data.contains_key(&key);
-        data.insert(key, value);
+        let found = memory_db.insert(key.clone(), value.clone()).is_some();
+        let _ = self.persistent_db.insert(key.as_bytes(), value.as_bytes());
 
         format!(
             "PUT {} {}",
@@ -49,11 +68,14 @@ impl KeyValueDb {
             panic!("SWAP requires 2 arguments");
         }
 
-        let mut data = self.data.write().unwrap();
-        let key = op.args[0].clone();
-        let new_value = op.args[1].clone();
+        let mut memory_db = self.memory_db.write().unwrap();
+        let key = &op.args[0];
+        let new_value = &op.args[1];
 
-        let old_value = data.insert(key, new_value);
+        let old_value = memory_db.insert(key.clone(), new_value.clone());
+        let _ = self
+            .persistent_db
+            .insert(key.as_bytes(), new_value.as_bytes());
 
         match old_value {
             Some(val) => format!("SWAP {} {}", op.args[0], val),
@@ -66,10 +88,10 @@ impl KeyValueDb {
             panic!("GET requires 1 argument");
         }
 
-        let data = self.data.read().unwrap();
+        let memory_db = self.memory_db.read().unwrap();
         let key = &op.args[0];
 
-        match data.get(key) {
+        match memory_db.get(key) {
             Some(value) => format!("GET {} {}", key, value),
             None => format!("GET {} null", key),
         }
@@ -80,10 +102,11 @@ impl KeyValueDb {
             panic!("DELETE requires 1 argument");
         }
 
-        let mut data = self.data.write().unwrap();
+        let mut memory_db = self.memory_db.write().unwrap();
         let key = &op.args[0];
 
-        let found = data.remove(key).is_some();
+        let found = memory_db.remove(key).is_some();
+        let _ = self.persistent_db.remove(key.as_bytes());
 
         format!(
             "DELETE {} {}",
@@ -97,13 +120,13 @@ impl KeyValueDb {
             panic!("SCAN requires 2 arguments");
         }
 
-        let data = self.data.read().unwrap();
+        let memory_db = self.memory_db.read().unwrap();
         let start_key = &op.args[0];
         let end_key = &op.args[1];
 
         let mut result = format!("SCAN {} {} BEGIN", start_key, end_key);
 
-        for (key, value) in data.range(start_key.to_owned()..=end_key.to_owned()) {
+        for (key, value) in memory_db.range(start_key.to_owned()..=end_key.to_owned()) {
             result.push_str(&format!("\n  {} {}", key, value));
         }
 
@@ -112,19 +135,50 @@ impl KeyValueDb {
     }
 }
 
-impl Default for KeyValueDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_persistence() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path();
+
+        // Create and populate the database
+        {
+            let db = KeyValueDb::new(db_path).unwrap();
+
+            let put_op = Operation {
+                id: 1,
+                name: "PUT".to_string(),
+                args: vec!["persist_key".to_string(), "persist_value".to_string()],
+            };
+
+            db.execute(&put_op);
+            // Explicitly flush to ensure data is written
+            db.persistent_db.flush().unwrap();
+        }
+
+        // Create a new instance and verify data persisted
+        {
+            let db = KeyValueDb::new(db_path).unwrap();
+
+            let get_op = Operation {
+                id: 2,
+                name: "GET".to_string(),
+                args: vec!["persist_key".to_string()],
+            };
+
+            let result = db.execute(&get_op);
+            assert_eq!(result, "GET persist_key persist_value");
+        }
+    }
 
     #[test]
     fn test_put_and_get() {
-        let db = KeyValueDb::new();
+        let dir = tempdir().unwrap();
+        let db = KeyValueDb::new(dir.path()).unwrap();
 
         // First PUT
         let put_op1 = Operation {
@@ -153,7 +207,8 @@ mod tests {
 
     #[test]
     fn test_swap() {
-        let db = KeyValueDb::new();
+        let dir = tempdir().unwrap();
+        let db = KeyValueDb::new(dir.path()).unwrap();
 
         // First SWAP (should return null)
         let swap_op1 = Operation {
@@ -174,7 +229,8 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let db = KeyValueDb::new();
+        let dir = tempdir().unwrap();
+        let db = KeyValueDb::new(dir.path()).unwrap();
 
         // PUT first
         let put_op = Operation {
@@ -203,7 +259,8 @@ mod tests {
 
     #[test]
     fn test_scan() {
-        let db = KeyValueDb::new();
+        let dir = tempdir().unwrap();
+        let db = KeyValueDb::new(dir.path()).unwrap();
 
         // Populate some data
         let put_ops = vec![

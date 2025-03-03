@@ -8,16 +8,16 @@ use executor::Executor;
 use gateway::GatewayService;
 use lock_manager::LockManager;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::info;
 
-pub async fn run_server(addr: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_server(addr: String, db_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let (executor_tx, executor_rx) = mpsc::unbounded_channel();
     let (lock_mananger_tx, lock_manager_rx) = mpsc::unbounded_channel();
 
     // Start executor.
-    let db = Arc::new(KeyValueDb::new());
+    let db = Arc::new(KeyValueDb::new(db_path)?);
     let executor = Executor::new(executor_rx, lock_mananger_tx, db);
     tokio::spawn(executor.run());
     info!("Started executor");
