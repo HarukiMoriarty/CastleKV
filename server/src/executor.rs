@@ -93,7 +93,7 @@ impl Executor {
 
                                             for op in cmd.ops.iter() {
                                                 // Execute operation on the database
-                                                let op_result = db.execute(op);
+                                                let op_result = db.execute(op, cmd_id);
 
                                                 ops_results.push(OperationResult {
                                                     id: op.id,
