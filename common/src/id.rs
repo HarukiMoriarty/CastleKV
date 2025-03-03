@@ -112,7 +112,7 @@ impl From<u64> for CommandId {
 
 impl From<CommandId> for u64 {
     fn from(cmd_id: CommandId) -> Self {
-        (cmd_id.1 as u64) << NodeId::BIT_LENGTH | ((cmd_id.0).0 as u64)
+        ((cmd_id.1 as u64) << NodeId::BIT_LENGTH) | ((cmd_id.0).0 as u64)
     }
 }
 

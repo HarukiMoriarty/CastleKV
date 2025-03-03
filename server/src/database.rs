@@ -18,12 +18,10 @@ impl KeyValueDb {
         // Load existing data from persistent storage into memory
         {
             let mut memory_cache = memory_db.write().unwrap();
-            for result in persistent_db.iter() {
-                if let Ok((key, value)) = result {
-                    let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
-                    let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
-                    memory_cache.insert(key_str, value_str);
-                }
+            for (key, value) in persistent_db.iter().flatten() {
+                let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
+                let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
+                memory_cache.insert(key_str, value_str);
             }
         }
 

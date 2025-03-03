@@ -267,10 +267,7 @@ impl LockManager {
 
                     // Try to acquire all locks
                     for (key, mode) in &lock_requests {
-                        let lock = self
-                            .locks
-                            .entry(key.clone())
-                            .or_insert_with(|| Lock::default());
+                        let lock = self.locks.entry(key.clone()).or_default();
                         debug!("Lock {lock:?}");
                         match lock.acquire_lock(cmd_id, *mode) {
                             AcquireLockResult::Acquired {

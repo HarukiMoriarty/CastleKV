@@ -93,7 +93,7 @@ impl Executor {
 
                                             for op in cmd.ops.iter() {
                                                 // Execute operation on the database
-                                                let op_result = db.execute(&op);
+                                                let op_result = db.execute(op);
 
                                                 ops_results.push(OperationResult {
                                                     id: op.id,
@@ -170,10 +170,8 @@ impl Executor {
                     }
                 }
                 "GET" => {
-                    if op.args.len() >= 2 {
-                        if !write_set.contains(&op.args[0]) {
-                            read_set.insert(op.args[0].clone());
-                        }
+                    if op.args.len() >= 2 && !write_set.contains(&op.args[0]) {
+                        read_set.insert(op.args[0].clone());
                     }
                 }
                 "SCAN" => {
