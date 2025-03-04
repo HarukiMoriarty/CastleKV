@@ -1,9 +1,9 @@
-mod comm;
-mod database;
+pub mod comm;
+pub mod database;
 mod executor;
 mod gateway;
 mod lock_manager;
-mod storage;
+pub mod storage;
 
 use database::KeyValueDb;
 use executor::Executor;

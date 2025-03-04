@@ -2,7 +2,7 @@ use common::CommandId;
 use tokio::sync::oneshot;
 
 // Communication between in-memory database and disk storage.
-pub(crate) enum StorageMessage {
+pub enum StorageMessage {
     Put {
         cmd_id: CommandId,
         op_id: u32,
