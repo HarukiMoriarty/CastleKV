@@ -96,7 +96,7 @@ async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> S
                 continue;
             }
             Ok(output) if output == "Aborted" => {
-                // panic!("Command still aborted after {} retries", MAX_RETRIES);
+                panic!("Command still aborted after {} retries", MAX_RETRIES);
             }
             Ok(output) => return output,
             Err(e) => panic!("{}", e),
@@ -104,30 +104,114 @@ async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> S
     }
 }
 
-fn handle_result(result: anyhow::Result<CommandResult>) -> Result<String, String> {
+fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, String> {
     match result {
-        Ok(cmd_result) => {
-            let mut output = Vec::new();
+        Ok(cmd_results) => {
+            // Specific optimization for YCSB benchmark
+            // For PUT, GET, SWAP, DELETE, only has one command result with one operation result
+            // For SCAN, might have multiple command result with each has one operation result
+            assert!(cmd_results.len() >= 1);
+            if cmd_results.len() == 1 {
+                let cmd_result = &cmd_results[0];
+                let mut output = Vec::new();
 
-            if cmd_result.has_err {
-                return Err(if !cmd_result.content.is_empty() {
-                    cmd_result.content
-                } else {
-                    "command failed".to_string()
-                });
-            }
-
-            let mut sorted_ops = cmd_result.ops.clone();
-            sorted_ops.sort_by_key(|op| op.id);
-            for op in sorted_ops {
-                if !op.has_err {
-                    output.push(op.content.to_owned());
+                if cmd_result.has_err {
+                    return Err(if !cmd_result.content.is_empty() {
+                        cmd_result.content.clone()
+                    } else {
+                        "command failed".to_string()
+                    });
                 }
-            }
 
-            match cmd_result.status() {
-                Status::Aborted => Ok("Aborted".to_string()),
-                Status::Committed => Ok(output.join("\n")),
+                assert!(cmd_result.ops.len() == 1);
+                output.push(cmd_result.ops[0].content.to_owned());
+
+                match cmd_result.status() {
+                    Status::Aborted => Ok("Aborted".to_string()),
+                    Status::Committed => Ok(output.join("\n")),
+                }
+            } else {
+                let has_err = cmd_results.iter().any(|res| res.has_err);
+
+                if has_err {
+                    let error_content: String = cmd_results
+                        .iter()
+                        .map(|res| res.content.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    return Err(if !error_content.is_empty() {
+                        error_content
+                    } else {
+                        "command failed".to_string()
+                    });
+                }
+
+                // Process SCAN operation result
+                let mut min_start_key = String::new();
+                let mut max_end_key = String::new();
+                let mut scan_entries = Vec::new();
+
+                // Process all results to find boundaries and collect entries
+                for result in &cmd_results {
+                    assert!(result.ops.len() == 1);
+                    let op = &result.ops[0];
+
+                    if op.has_err {
+                        continue;
+                    }
+
+                    let lines: Vec<&str> = op.content.lines().collect();
+
+                    // Parse the SCAN line to get keys
+                    if !lines.is_empty() && lines[0].trim().starts_with("SCAN ") {
+                        let parts: Vec<&str> = lines[0].trim().split_whitespace().collect();
+                        if parts.len() >= 3 {
+                            let start_key = parts[1].to_string();
+                            let end_key = parts[2].to_string();
+
+                            // Update min start key
+                            if min_start_key.is_empty() || start_key < min_start_key {
+                                min_start_key = start_key;
+                            }
+
+                            // Update max end key
+                            if max_end_key.is_empty() || end_key > max_end_key {
+                                max_end_key = end_key;
+                            }
+                        }
+                    }
+
+                    // Collect entries (skipping the SCAN header)
+                    for line in lines.iter().skip(1) {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.contains("SCAN END") {
+                            scan_entries.push(trimmed.to_string());
+                        }
+                    }
+                }
+
+                // Format the combined scan result
+                let mut scan_result = Vec::new();
+                scan_result.push(format!("SCAN {} {} BEGIN", min_start_key, max_end_key));
+
+                // Add collected entries
+                for entry in scan_entries {
+                    scan_result.push(entry);
+                }
+
+                scan_result.push("SCAN END".to_string());
+
+                // Determine overall status
+                let any_aborted = cmd_results
+                    .iter()
+                    .any(|res| res.status == Status::Aborted.into());
+
+                if any_aborted {
+                    Ok("Aborted".to_string())
+                } else {
+                    Ok(scan_result.join("\n"))
+                }
             }
         }
         Err(e) => Err(error(e)),
