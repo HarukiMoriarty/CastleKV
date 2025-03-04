@@ -9,24 +9,28 @@ use crate::comm::StorageMessage;
 
 pub struct KeyValueDb {
     memory_db: Arc<RwLock<BTreeMap<String, String>>>,
-    storage_tx: mpsc::UnboundedSender<StorageMessage>,
+    storage_tx: Option<mpsc::UnboundedSender<StorageMessage>>,
 }
 
 impl KeyValueDb {
     pub fn new(
-        db_path: impl AsRef<Path>,
-        storage_tx: mpsc::UnboundedSender<StorageMessage>,
+        db_path: Option<impl AsRef<Path>>,
+        storage_tx: Option<mpsc::UnboundedSender<StorageMessage>>,
     ) -> Result<Self, sled::Error> {
-        let persistent_db = sled::open(db_path)?;
         let memory_db = Arc::new(RwLock::new(BTreeMap::new()));
 
         // Load existing data from persistent storage into memory
-        {
-            let mut memory_cache = memory_db.write().unwrap();
-            for (key, value) in persistent_db.iter().flatten() {
-                let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
-                let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
-                memory_cache.insert(key_str, value_str);
+        if let Some(path) = db_path {
+            let persistent_db = sled::open(path)?;
+
+            // Load existing data from persistent storage into memory
+            {
+                let mut memory_cache = memory_db.write().unwrap();
+                for (key, value) in persistent_db.iter().flatten() {
+                    let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
+                    let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
+                    memory_cache.insert(key_str, value_str);
+                }
             }
         }
 
@@ -57,14 +61,16 @@ impl KeyValueDb {
         let value = &op.args[1];
 
         let found = memory_db.insert(key.clone(), value.clone()).is_some();
-        self.storage_tx
-            .send(StorageMessage::Put {
-                cmd_id,
-                op_id: op.id,
-                key: key.clone(),
-                value: value.clone(),
-            })
-            .unwrap();
+        if let Some(storage_tx) = &self.storage_tx {
+            storage_tx
+                .send(StorageMessage::Put {
+                    cmd_id,
+                    op_id: op.id,
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .unwrap();
+        }
 
         format!(
             "PUT {} {}",
@@ -83,14 +89,16 @@ impl KeyValueDb {
         let new_value = &op.args[1];
 
         let old_value = memory_db.insert(key.clone(), new_value.clone());
-        self.storage_tx
-            .send(StorageMessage::Put {
-                cmd_id,
-                op_id: op.id,
-                key: key.clone(),
-                value: new_value.clone(),
-            })
-            .unwrap();
+        if let Some(storage_tx) = &self.storage_tx {
+            storage_tx
+                .send(StorageMessage::Put {
+                    cmd_id,
+                    op_id: op.id,
+                    key: key.clone(),
+                    value: new_value.clone(),
+                })
+                .unwrap();
+        }
 
         match old_value {
             Some(val) => format!("SWAP {} {}", op.args[0], val),
@@ -121,13 +129,15 @@ impl KeyValueDb {
         let key = &op.args[0];
 
         let found = memory_db.remove(key).is_some();
-        self.storage_tx
-            .send(StorageMessage::Delete {
-                key: key.clone(),
-                cmd_id,
-                op_id: op.id,
-            })
-            .unwrap();
+        if let Some(storage_tx) = &self.storage_tx {
+            storage_tx
+                .send(StorageMessage::Delete {
+                    key: key.clone(),
+                    cmd_id,
+                    op_id: op.id,
+                })
+                .unwrap();
+        }
 
         format!(
             "DELETE {} {}",
@@ -157,7 +167,9 @@ impl KeyValueDb {
 
     pub async fn sync(&self) -> Result<(), oneshot::error::RecvError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self.storage_tx.send(StorageMessage::Flush { reply_tx });
+        if let Some(storage_tx) = &self.storage_tx {
+            storage_tx.send(StorageMessage::Flush { reply_tx }).unwrap();
+        }
         reply_rx.await
     }
 }

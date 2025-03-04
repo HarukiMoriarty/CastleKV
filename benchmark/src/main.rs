@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let address = format!("http://{}", cli.connect_addr);
-    let mut session = Session::remote("terminal", address).await?;
+    let mut session = Session::remote("stdI/O", address).await?;
 
     // Read from stdin
     let stdin = io::stdin();

@@ -1,10 +1,10 @@
 use sled::Db;
-use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::comm::StorageMessage;
+use crate::config::ServerConfig;
 
 pub struct Storage {
     // Persistence sled database
@@ -18,17 +18,17 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(
-        db_path: impl AsRef<Path>,
+        config: &ServerConfig,
         storage_rx: mpsc::UnboundedReceiver<StorageMessage>,
     ) -> Result<Self, sled::Error> {
         // Open the sled database
-        let db = sled::open(db_path)?;
+        let db = sled::open(config.db_path.clone().unwrap())?;
 
         Ok(Self {
             db,
             storage_rx,
-            max_batch_size: 1000,
-            flush_interval: Duration::from_millis(100),
+            max_batch_size: config.batch_size.unwrap(),
+            flush_interval: Duration::from_millis(config.batch_timeout_ms.unwrap()),
         })
     }
 

@@ -16,7 +16,7 @@ macro_rules! primitive_id {
             Serialize,
             Deserialize,
         )]
-        pub struct $name($repr_type);
+        pub struct $name(pub $repr_type);
 
         impl From<$name> for $repr_type {
             fn from(node_id: $name) -> Self {

@@ -1,6 +1,6 @@
 use rpc::gateway::{Command, CommandResult, Operation, OperationResult, Status};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
-use common::CommandId;
+use common::{CommandId, NodeId};
 
 pub type ExecutorSender = mpsc::UnboundedSender<ExecutorMessage>;
 type ExecutorReceiver = mpsc::UnboundedReceiver<ExecutorMessage>;
@@ -22,22 +22,25 @@ pub enum ExecutorMessage {
 }
 
 pub struct Executor {
+    node_id: NodeId,
     rx: ExecutorReceiver,
     lock_manager_tx: LockManagerSender,
-    cmd_cnt: Arc<AtomicU64>,
+    cmd_cnt: Arc<AtomicU32>,
     db: Arc<KeyValueDb>,
 }
 
 impl Executor {
     pub fn new(
+        node_id: NodeId,
         rx: ExecutorReceiver,
         lock_manager_tx: LockManagerSender,
         db: Arc<KeyValueDb>,
     ) -> Self {
         Self {
+            node_id,
             rx,
             lock_manager_tx,
-            cmd_cnt: Arc::new(AtomicU64::new(1)),
+            cmd_cnt: Arc::new(AtomicU32::new(1)),
             db,
         }
     }
@@ -69,8 +72,10 @@ impl Executor {
                                     }
 
                                     let (lock_resp_tx, lock_resp_rx) = oneshot::channel();
-                                    let cmd_id =
-                                        CommandId::from(cmd_cnt.fetch_add(1, Ordering::SeqCst));
+                                    let cmd_id = CommandId::new(
+                                        self.node_id,
+                                        cmd_cnt.fetch_add(1, Ordering::SeqCst),
+                                    );
 
                                     // Request locks
                                     if lock_manager_tx

@@ -1,12 +1,14 @@
 #[cfg(test)]
 mod tests {
     use rpc::gateway::Operation;
+    use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::runtime::Runtime;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
 
+    use server::config::ServerConfig;
     use server::database::KeyValueDb;
     use server::storage::Storage;
 
@@ -15,13 +17,22 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let dir = tempdir().unwrap();
-            let db_path = dir.path();
+            let db_path = dir.path().to_path_buf();
 
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
-            // Initialize the database and storage
-            let db = KeyValueDb::new(db_path, storage_tx).unwrap();
-            let storage = Storage::new(db_path, storage_rx).unwrap();
+            // Initialize the database and storage with path
+            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+
+            // Create storage config with batch settings
+            let storage_config = ServerConfig::builder()
+                .db_path(Some(db_path.clone()))
+                .persistence_enabled(true)
+                .batch_size(Some(10)) // Small batch size for testing
+                .batch_timeout_ms(Some(500))
+                .build();
+
+            let storage = Storage::new(&storage_config, storage_rx).unwrap();
 
             // Start the storage service in the background
             let storage_handle = tokio::spawn(storage.run());
@@ -57,7 +68,7 @@ mod tests {
 
             // Create a new instance of db and storage to verify persistence
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(db_path, storage_tx2).unwrap();
+            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
 
             // Verify the data was persisted to disk and loaded into the new instance
             let get_op2 = Operation {
@@ -76,13 +87,22 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let dir = tempdir().unwrap();
-            let db_path = dir.path();
+            let db_path = dir.path().to_path_buf();
 
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
-            // Initialize the database and storage with small batch size
-            let db = KeyValueDb::new(db_path, storage_tx).unwrap();
-            let storage = Storage::new(db_path, storage_rx).unwrap();
+            // Initialize the database with path
+            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+
+            // Create storage with small batch size for testing
+            let storage_config = ServerConfig::builder()
+                .db_path(Some(db_path.clone()))
+                .persistence_enabled(true)
+                .batch_size(Some(10)) // Small batch size - should trigger multiple batches
+                .batch_timeout_ms(Some(50)) // Short timeout for quick testing
+                .build();
+
+            let storage = Storage::new(&storage_config, storage_rx).unwrap();
 
             // Start the storage service in the background
             let storage_handle = tokio::spawn(storage.run());
@@ -165,7 +185,7 @@ mod tests {
 
             // Verify persistence after restart
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(db_path, storage_tx2).unwrap();
+            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
 
             // Check deleted key is still gone
             let get_op4 = Operation {
@@ -186,6 +206,49 @@ mod tests {
 
             let result = db2.execute(&get_op5, 1007.into());
             assert_eq!(result, "GET key6 value6");
+        });
+    }
+
+    #[test]
+    fn test_in_memory_mode() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            // Initialize database with no path (in-memory only)
+            let db = KeyValueDb::new(None::<&Path>, None).unwrap();
+
+            // Test operations work in memory
+            let put_op = Operation {
+                id: 1,
+                name: "PUT".to_string(),
+                args: vec!["memory_key".to_string(), "memory_value".to_string()],
+            };
+
+            db.execute(&put_op, 1.into());
+
+            let get_op = Operation {
+                id: 2,
+                name: "GET".to_string(),
+                args: vec!["memory_key".to_string()],
+            };
+
+            let result = db.execute(&get_op, 2.into());
+            assert_eq!(result, "GET memory_key memory_value");
+
+            // Drop the database instance
+            drop(db);
+
+            // Creating a new instance should start with empty data
+            let db2 = KeyValueDb::new(None::<&Path>, None).unwrap();
+
+            let get_op2 = Operation {
+                id: 3,
+                name: "GET".to_string(),
+                args: vec!["memory_key".to_string()],
+            };
+
+            // Should not find the key from the previous in-memory instance
+            let result = db2.execute(&get_op2, 3.into());
+            assert_eq!(result, "GET memory_key null");
         });
     }
 }
