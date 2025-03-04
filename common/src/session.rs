@@ -128,9 +128,9 @@ impl Session {
     pub fn get_next_op_id(&mut self) -> Option<u32> {
         if let Some(next_op_id) = self.next_op_id {
             self.next_op_id = Some(next_op_id + 1);
-            return Some(next_op_id);
+            Some(next_op_id)
         } else {
-            return None;
+            None
         }
     }
 

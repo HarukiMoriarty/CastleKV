@@ -242,7 +242,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                     let mut content_lines = result.content.lines();
                     if let Some(first_line) = content_lines.next() {
                         if first_line.trim().starts_with("SCAN ") {
-                            let parts: Vec<&str> = first_line.trim().split_whitespace().collect();
+                            let parts: Vec<&str> = first_line.split_whitespace().collect();
                             if parts.len() >= 3 {
                                 let start_key = parts[1].to_string();
                                 let end_key = parts[2].to_string();
@@ -278,7 +278,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
 
                 // Add the formatted output
                 if scan_has_err {
-                    output.push(format!("{}> {}", op_id, error(&scan_output.join("\n"))));
+                    output.push(format!("{}> {}", op_id, error(scan_output.join("\n"))));
                 } else {
                     output.push(format!("{}> {}", op_id, scan_output.join("\n")));
                 }

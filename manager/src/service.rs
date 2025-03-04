@@ -76,8 +76,8 @@ impl ManagerService for Manager {
                 );
 
                 Ok(Response::new(RegisterServerResponse {
-                    start_key: format!("key{}", start_key.to_string()),
-                    end_key: format!("key{}", end_key.to_string()),
+                    start_key: format!("key{}", start_key),
+                    end_key: format!("key{}", end_key),
                     has_err: false,
                 }))
             }
@@ -103,8 +103,8 @@ impl ManagerService for Manager {
         for (server_addr, (start_key, end_key)) in assignments.iter() {
             partitions.push(PartitionInfo {
                 server_address: server_addr.clone(),
-                start_key: format!("key{}", start_key.to_string()),
-                end_key: format!("key{}", end_key.to_string()),
+                start_key: format!("key{}", start_key),
+                end_key: format!("key{}", end_key),
             });
         }
 

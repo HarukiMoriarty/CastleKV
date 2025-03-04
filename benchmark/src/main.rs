@@ -110,7 +110,7 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
             // Specific optimization for YCSB benchmark
             // For PUT, GET, SWAP, DELETE, only has one command result with one operation result
             // For SCAN, might have multiple command result with each has one operation result
-            assert!(cmd_results.len() >= 1);
+            assert!(!cmd_results.is_empty());
             if cmd_results.len() == 1 {
                 let cmd_result = &cmd_results[0];
                 let mut output = Vec::new();
@@ -165,7 +165,7 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
 
                     // Parse the SCAN line to get keys
                     if !lines.is_empty() && lines[0].trim().starts_with("SCAN ") {
-                        let parts: Vec<&str> = lines[0].trim().split_whitespace().collect();
+                        let parts: Vec<&str> = lines[0].split_whitespace().collect();
                         if parts.len() >= 3 {
                             let start_key = parts[1].to_string();
                             let end_key = parts[2].to_string();
