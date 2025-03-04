@@ -4,7 +4,7 @@ use common::{init_tracing, set_default_rust_log};
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "0.0.0.0:23001")]
+    #[arg(long, default_value = "0.0.0.0:24000")]
     listen_addr: String,
 
     #[arg(long)]

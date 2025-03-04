@@ -1,8 +1,9 @@
 use clap::Parser;
 use common::{init_tracing, set_default_rust_log, Session};
-use rpc::gateway::{CommandResult, Status};
+use rpc::gateway::{CommandResult, OperationResult, Status};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Instant;
 
@@ -12,7 +13,7 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "0.0.0.0:23000",
+        default_value = "0.0.0.0:24000",
         help = "The address to connect to."
     )]
     connect_addr: String,
@@ -32,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let mut measure_time = false;
 
     loop {
-        let readline = rl.readline(&get_prompt(&session));
+        let readline = rl.readline(&get_prompt(&mut session));
         match readline {
             Ok(line) => {
                 let tokens = tokenize(&line);
@@ -115,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_prompt(session: &Session) -> String {
+fn get_prompt(session: &mut Session) -> String {
     let mut prompt = String::new();
     if let Some(op_id) = session.get_next_op_id() {
         prompt.push_str(&format!("[op {op_id}]"));
@@ -189,34 +190,128 @@ async fn handle_direct_op(session: &mut Session, op: &str, args: &[String]) -> S
     format_result(session.finish_command().await)
 }
 
-fn format_result(result: anyhow::Result<CommandResult>) -> String {
-    result.map_or_else(error, |cmd_result| {
+fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
+    result.map_or_else(error, |cmd_results| {
         let mut output = Vec::new();
-        if cmd_result.has_err {
-            output.push(if !cmd_result.content.is_empty() {
-                error(&cmd_result.content)
-            } else {
-                error("operation failed")
-            });
-        } else if !cmd_result.content.is_empty() {
-            output.push(cmd_result.content.to_owned());
-        };
 
-        let mut sorted_ops = cmd_result.ops.clone();
-        sorted_ops.sort_by_key(|op| op.id);
-        for op in sorted_ops {
-            let line = if op.has_err {
-                error(&op.content)
-            } else {
-                op.content.to_owned()
-            };
+        // Combine command content from all results
+        let combined_content: String = cmd_results
+            .iter()
+            .filter(|res| !res.content.is_empty())
+            .map(|res| res.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
 
-            output.push(format!("{}> {line}", op.id))
+        if !combined_content.is_empty() {
+            output.push(combined_content);
         }
-        match cmd_result.status() {
-            Status::Aborted => output.push("ABORTED".to_owned()),
-            Status::Committed => output.push("COMMITTED".to_owned()),
+
+        // Collect all operations from all results
+        let mut all_op_results = Vec::new();
+        for cmd_result in &cmd_results {
+            all_op_results.extend(cmd_result.ops.clone());
         }
+        all_op_results.sort_by_key(|op| op.id);
+
+        // Group operations by ID
+        let mut op_groups: HashMap<u32, Vec<OperationResult>> = HashMap::new();
+        for op_result in &all_op_results {
+            op_groups
+                .entry(op_result.id)
+                .or_default()
+                .push(op_result.clone());
+        }
+
+        // Process each operation group
+        for (op_id, results) in op_groups.iter() {
+            if results.is_empty() {
+                continue;
+            }
+
+            let first_result = results[0].clone();
+            let is_scan = first_result.content.trim_start().starts_with("SCAN ");
+
+            if is_scan {
+                // Find min start key and max end key across all partitions
+                let mut min_start_key = String::new();
+                let mut max_end_key = String::new();
+                let mut scan_data = Vec::new();
+                let scan_has_err = results.iter().any(|o| o.has_err);
+
+                for result in results {
+                    let mut content_lines = result.content.lines();
+                    if let Some(first_line) = content_lines.next() {
+                        if first_line.trim().starts_with("SCAN ") {
+                            let parts: Vec<&str> = first_line.trim().split_whitespace().collect();
+                            if parts.len() >= 3 {
+                                let start_key = parts[1].to_string();
+                                let end_key = parts[2].to_string();
+
+                                // Update min start key
+                                if min_start_key.is_empty() || start_key < min_start_key {
+                                    min_start_key = start_key;
+                                }
+
+                                // Update max end key
+                                if max_end_key.is_empty() || end_key > max_end_key {
+                                    max_end_key = end_key;
+                                }
+                            }
+                        }
+                    }
+
+                    // Collect data lines
+                    for line in content_lines {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with("SCAN ") {
+                            scan_data.push(trimmed.to_string());
+                        }
+                    }
+                }
+
+                let mut scan_output = Vec::new();
+                scan_output.push(format!("SCAN {} {} BEGIN", min_start_key, max_end_key));
+                for data_line in scan_data {
+                    scan_output.push(format!("  {}", data_line));
+                }
+                scan_output.push("SCAN END".to_string());
+
+                // Add the formatted output
+                if scan_has_err {
+                    output.push(format!("{}> {}", op_id, error(&scan_output.join("\n"))));
+                } else {
+                    output.push(format!("{}> {}", op_id, scan_output.join("\n")));
+                }
+            } else {
+                // Combine results for non-scan operations
+                let mut op_content = Vec::new();
+                let has_err = results.iter().any(|o| o.has_err);
+
+                for result in results {
+                    if !result.content.trim().is_empty() {
+                        op_content.push(result.content.clone());
+                    }
+                }
+
+                let combined = op_content.join("\n");
+                if has_err {
+                    output.push(format!("{}> {}", op_id, error(&combined)));
+                } else {
+                    output.push(format!("{}> {}", op_id, combined));
+                }
+            }
+        }
+
+        // Determine overall status
+        let any_aborted = cmd_results
+            .iter()
+            .any(|res| res.status == Status::Aborted.into());
+        if any_aborted {
+            output.push("ABORTED".to_owned());
+        } else {
+            output.push("COMMITTED".to_owned());
+        }
+
         output.join("\n")
     })
 }
