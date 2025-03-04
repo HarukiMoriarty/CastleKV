@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "client", "server", "rpc", "benchmark"]
+members = ["common", "client", "server", "rpc", "benchmark", "manager"]
 resolver = "2"
 
 [workspace.package]
@@ -28,3 +28,4 @@ client = { path = "./client" }
 common = { path = "./common" }
 rpc = { path = "./rpc" }
 server = { path = "./server" }
+manager = { path = "./manager" }

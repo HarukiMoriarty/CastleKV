@@ -1,0 +1,34 @@
+syntax = "proto3";
+package manager;
+
+service ManagerService {
+  /// Server registration
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+  
+  /// Client partition map query
+  rpc GetPartitionMap(GetPartitionMapRequest) returns (GetPartitionMapResponse);
+}
+
+message RegisterServerRequest {
+  string server_address = 1;
+}
+
+message RegisterServerResponse {
+  string start_key = 1;
+  string end_key = 2;
+  bool has_err = 3;
+}
+
+message GetPartitionMapRequest {
+  // Empty request
+}
+
+message PartitionInfo {
+  string server_address = 1;
+  string start_key = 2;
+  string end_key = 3;
+}
+
+message GetPartitionMapResponse {
+  repeated PartitionInfo partitions = 1;
+}

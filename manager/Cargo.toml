@@ -1,0 +1,16 @@
+[package]
+name = "manager"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+
+common = { path = "../common" }
+rpc = { path = "../rpc" }

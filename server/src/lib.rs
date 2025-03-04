@@ -24,23 +24,23 @@ pub async fn run_server(addr: String, db_path: PathBuf) -> Result<(), Box<dyn st
     let db = Arc::new(KeyValueDb::new(&db_path, storage_tx)?);
     let executor = Executor::new(executor_rx, lock_mananger_tx, db);
     tokio::spawn(executor.run());
-    info!("Started executor");
+    info!("Start executor");
 
     // Start storage.
     let storage = Storage::new(&db_path, storage_rx)?;
     tokio::spawn(storage.run());
-    info!("Started storage service");
+    info!("Start storage service");
 
     // Start lock manager.
     let lock_manager = LockManager::new(lock_manager_rx);
     tokio::spawn(lock_manager.run());
-    info!("Started lock manager");
+    info!("Start lock manager");
 
     // Start gateway.
     let addr = addr.parse()?;
     let gateway = GatewayService::new(executor_tx);
 
-    info!("Starting gateway on {}", addr);
+    info!("Start gateway on {}", addr);
     tonic::transport::Server::builder()
         .add_service(rpc::gateway::db_server::DbServer::new(gateway))
         .serve(addr)
