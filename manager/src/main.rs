@@ -4,13 +4,21 @@ use common::{init_tracing, set_default_rust_log};
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "0.0.0.0:24000")]
+    #[arg(
+        long,
+        default_value = "0.0.0.0:24000",
+        help = "The address to listen on"
+    )]
     listen_addr: String,
 
-    #[arg(long)]
+    #[arg(long, help = "The server list")]
     servers: String,
 
-    #[arg(long, default_value = "1000000")]
+    #[arg(
+        long,
+        default_value = "1000000",
+        help = "Total key number support in KV-store"
+    )]
     key_num: u64,
 }
 
