@@ -24,10 +24,13 @@ async fn main() -> anyhow::Result<()> {
     set_default_rust_log("info");
     init_tracing();
 
+    // Initialize the command line editor
     let mut rl = DefaultEditor::new()?;
 
+    // Parse command line arguments
     let cli = Cli::parse();
 
+    // Connect to the manager node to get partition settings
     let address = format!("http://{}", cli.connect_addr);
     let mut session = Session::remote("terminal", address).await?;
     let mut measure_time = false;
@@ -43,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let timer = measure_time.then(Instant::now);
 
+                // Process commands based on the first token
                 let output = match tokens[0].to_lowercase().as_str() {
                     "cmd" => handle_cmd(&mut session, &tokens),
                     "op" => handle_op(&mut session, &tokens).await,
@@ -58,17 +62,16 @@ async fn main() -> anyhow::Result<()> {
                     "exit" | "quit" => {
                         break;
                     }
-                    // Add direct key-value operations.
-                    "get" => handle_direct_op(&mut session, "get", &tokens[1..]).await,
-                    "set" => handle_direct_op(&mut session, "set", &tokens[1..]).await,
-                    "del" => handle_direct_op(&mut session, "del", &tokens[1..]).await,
                     _ => error(format!("unknown command: {line}")),
                 };
 
+                // Calculate elapsed time if timing is enabled
                 let elapsed = timer.map(|timer| timer.elapsed());
 
+                // Print command output
                 println!("{output}");
 
+                // Print timing information if enabled
                 if let Some(elapsed) = elapsed {
                     let elapsed_secs = elapsed.as_secs();
                     let elapsed_subsec_millis = elapsed.subsec_millis();
@@ -102,12 +105,15 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Err(ReadlineError::Interrupted) => {
+                // Handle Ctrl-C
                 break;
             }
             Err(ReadlineError::Eof) => {
+                // Handle Ctrl-D
                 break;
             }
             Err(err) => {
+                // Handle other errors
                 error(err);
                 break;
             }
@@ -116,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Generates the command prompt string based on session state
+///
+/// Includes the operation ID if a command is in progress
 fn get_prompt(session: &mut Session) -> String {
     let mut prompt = String::new();
     if let Some(op_id) = session.get_next_op_id() {
@@ -125,8 +134,10 @@ fn get_prompt(session: &mut Session) -> String {
     prompt
 }
 
-/// Tokenizes a string.
-/// A string wrapped with double quotes is considered as a single token.
+/// Tokenizes a string into a vector of tokens.
+///
+/// A string wrapped with double quotes is considered as a single token,
+/// allowing spaces within quoted strings.
 fn tokenize(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
@@ -152,6 +163,7 @@ fn tokenize(line: &str) -> Vec<String> {
     tokens
 }
 
+/// Start a new command
 fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
     if let Err(e) = session.new_command() {
         return error(e);
@@ -160,6 +172,9 @@ fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
     "COMMAND".to_owned()
 }
 
+/// Add an operation to the current command
+///
+/// If no command is in progress, creates a new one and executes it immediately.
 async fn handle_op(session: &mut Session, tokens: &[String]) -> String {
     if tokens.len() < 2 {
         return error("invalid operation");
@@ -177,6 +192,7 @@ async fn handle_op(session: &mut Session, tokens: &[String]) -> String {
     }
 }
 
+/// Finish and execute the current command
 async fn handle_done(session: &mut Session, tokens: &[String]) -> String {
     if tokens.len() != 1 {
         return error("invalid DONE command");
@@ -184,12 +200,9 @@ async fn handle_done(session: &mut Session, tokens: &[String]) -> String {
     format_result(session.finish_command().await)
 }
 
-async fn handle_direct_op(session: &mut Session, op: &str, args: &[String]) -> String {
-    session.new_command().unwrap();
-    session.add_operation(op, args).unwrap();
-    format_result(session.finish_command().await)
-}
-
+/// Formats the results of a command execution for display
+///
+/// Handles special formatting for scan operations across multiple partitions.
 fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
     result.map_or_else(error, |cmd_results| {
         let mut output = Vec::new();
@@ -197,7 +210,6 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
         // Combine command content from all results
         let combined_content: String = cmd_results
             .iter()
-            .filter(|res| !res.content.is_empty())
             .map(|res| res.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
@@ -269,6 +281,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                     }
                 }
 
+                // Format scan results
                 let mut scan_output = Vec::new();
                 scan_output.push(format!("SCAN {} {} BEGIN", min_start_key, max_end_key));
                 for data_line in scan_data {
@@ -283,26 +296,20 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                     output.push(format!("{}> {}", op_id, scan_output.join("\n")));
                 }
             } else {
-                // Combine results for non-scan operations
-                let mut op_content = Vec::new();
-                let has_err = results.iter().any(|o| o.has_err);
+                // Combine results for non-SCAN operations.
+                assert!(results.len() == 1);
+                let result = &results[0];
+                let has_err = result.has_err;
 
-                for result in results {
-                    if !result.content.trim().is_empty() {
-                        op_content.push(result.content.clone());
-                    }
-                }
-
-                let combined = op_content.join("\n");
                 if has_err {
-                    output.push(format!("{}> {}", op_id, error(&combined)));
+                    output.push(format!("{}> {}", op_id, error(&result.content)));
                 } else {
-                    output.push(format!("{}> {}", op_id, combined));
+                    output.push(format!("{}> {}", op_id, result.content));
                 }
             }
         }
 
-        // Determine overall status
+        // Determine overall command status
         let any_aborted = cmd_results
             .iter()
             .any(|res| res.status == Status::Aborted.into());
@@ -316,6 +323,9 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
     })
 }
 
+/// Formats an error message
+///
+/// Prefixes the message with "ERROR "
 fn error(msg: impl Display) -> String {
     format!("ERROR {msg}")
 }

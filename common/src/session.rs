@@ -10,27 +10,46 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
 
+/// Client connection state.
 enum Client {
     Remote {
+        /// Map of server addresses to command sender channels
         txs: HashMap<String, mpsc::Sender<Command>>,
+        /// Map of server addresses to command result receiver streams
         rxs: HashMap<String, Streaming<CommandResult>>,
     },
     DryRun,
 }
 
 /// A session that wraps a connection to the gateway.
-///
-/// The session provides methods to execute commands and transactions.
+/// The session provides methods to execute commands
+/// across multiple partition servers in a distributed KV store.
 pub struct Session {
+    /// The client connection state
     client: Client,
+    /// Name of the session
     name: String,
+    /// Map of server to commands during command building
     cmds: Option<HashMap<String, Command>>,
+    /// Information about available partitions and their server locations
     partition_info: Vec<PartitionInfo>,
+    /// ID counter for the next operation
     next_op_id: Option<u32>,
 }
 
 impl Session {
+    /// Creates a new remote session connected to partitioned servers.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the session
+    /// * `manager_addr` - The address of the manager service
+    ///
+    /// # Returns
+    ///
+    /// A new Session connected to all available partition servers
     pub async fn remote(name: &str, manager_addr: String) -> Result<Self> {
+        // Connect to the manager service to get partition information
         let mut manager_client = ManagerServiceClient::connect(manager_addr)
             .await
             .context("Failed to connect to manager")?;
@@ -43,6 +62,7 @@ impl Session {
         let mut txs = HashMap::new();
         let mut rxs = HashMap::new();
 
+        // Connect to each partition server and rpc streams
         for partition in &partition_info {
             let server_addr = format!("http://{}", partition.server_address);
             let mut db = DbClient::connect(server_addr).await.context(format!(
@@ -56,6 +76,7 @@ impl Session {
             request
                 .metadata_mut()
                 .insert(metadata::SESSION_NAME, FromStr::from_str(name).unwrap());
+
             let rx = db
                 .connect_executor(request)
                 .await
@@ -78,6 +99,16 @@ impl Session {
         })
     }
 
+    /// Creates a new session in dry run mode that logs operations
+    /// without executing them. For testing and debugging.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the session
+    ///
+    /// # Returns
+    ///
+    /// A new Session in dry run mode
     pub fn dry_run(name: &str) -> Self {
         Self {
             client: Client::DryRun,
@@ -88,16 +119,26 @@ impl Session {
         }
     }
 
+    /// Returns the name of the session
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Determines which server is responsible for a specific key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up (add "key" prefix if not present)
+    ///
+    /// # Returns
+    ///
+    /// The server address responsible for the key, or None if no server is found
     fn get_server_for_key(&self, key: &str) -> Option<&str> {
         let key_value = {
             if key.starts_with("key") {
                 key.to_string()
             } else {
-                return None;
+                format!("key{}", key)
             }
         };
 
@@ -113,6 +154,10 @@ impl Session {
     ///
     /// The command is not executed until [`finish_command`](Self::finish_command) is called. If a
     /// command is already in progress, return an error.
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to self for method chaining
     pub fn new_command(&mut self) -> Result<&mut Self> {
         ensure!(
             self.cmds.is_none() && self.next_op_id.is_none(),
@@ -124,7 +169,11 @@ impl Session {
         Ok(self)
     }
 
-    /// Returns the id of the next operation.
+    /// Returns the id of the next operation and increments the counter.
+    ///
+    /// # Returns
+    ///
+    /// The next operation ID, or None if no command is in progress
     pub fn get_next_op_id(&mut self) -> Option<u32> {
         if let Some(next_op_id) = self.next_op_id {
             self.next_op_id = Some(next_op_id + 1);
@@ -136,22 +185,27 @@ impl Session {
 
     /// Adds an operation to the current command.
     ///
+    /// Routes the operation to the appropriate server based on the keys involved.
+    /// Handles both single (PUT, GET, DELETE, SWAP) operations and SCAN operations that may span multiple partitions.
+    ///
     /// If no existing command builder previously created by [`new_command`](Self::new_command)
     /// exists, returns an error.
     ///
     /// # Arguments
     ///
-    /// * `name` - The name of the operation.
-    /// * `args` - The arguments of the operation.
+    /// * `name` - The name of the operation (e.g., "get", "set", "scan")
+    /// * `args` - The arguments of the operation (e.g., key names, values)
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to self for method chaining
     pub fn add_operation(&mut self, name: &str, args: &[String]) -> Result<&mut Self> {
         if self.cmds.is_none() {
             bail!("no command in progress");
         };
 
-        if (name == "get" || name == "set" || name == "del" || name == "put" || name == "swap")
-            && !args.is_empty()
-        {
-            // Single key operations
+        // Handle single-key operations
+        if (name == "get" || name == "del" || name == "put" || name == "swap") && !args.is_empty() {
             let key = &args[0];
             let server_addr = self
                 .get_server_for_key(key)
@@ -178,13 +232,15 @@ impl Session {
                     ops: vec![],
                 });
             cmd.ops.push(op);
-        } else if name == "scan" && args.len() >= 2 {
+        }
+        // Handle scan operations that might span multiple partitions
+        else if name == "scan" && args.len() >= 2 {
             let start_key = &args[0];
             let end_key = &args[1];
 
             // Check if start and end are valid
             if start_key > end_key {
-                bail!("Invalid scan range: start key must be <= end key");
+                bail!("Invalid scan range: start key must be less or equal than end key");
             }
 
             // For each partition, create a scan operation if the range overlaps
@@ -193,8 +249,11 @@ impl Session {
             self.next_op_id = Some(id + 1);
 
             for partition in &self.partition_info {
+                // Check if scan range overlaps with this partition
                 if !(*end_key < partition.start_key || *start_key > partition.end_key) {
                     added_to_any_server = true;
+
+                    // Calculate effective range for this partition (intersection of request and partition range)
                     let effective_start = if *start_key > partition.start_key {
                         start_key.clone()
                     } else {
@@ -240,10 +299,14 @@ impl Session {
         Ok(self)
     }
 
-    /// Finishes the current command and execute it.
+    /// Finishes the current command and executes it on all relevant servers.
     ///
     /// If no existing command builder previously created by [`new_command`](Self::new_command)
     /// exists, returns an error.
+    ///
+    /// # Returns
+    ///
+    /// A vector of command results from each server that processed operations
     pub async fn finish_command(&mut self) -> Result<Vec<CommandResult>> {
         let Some(cmds) = self.cmds.take() else {
             bail!("no command in progress");
@@ -252,6 +315,7 @@ impl Session {
 
         let mut results = Vec::new();
 
+        // Execute commands on each relevant server
         for (server_addr, cmd) in cmds {
             if cmd.ops.is_empty() {
                 continue;
@@ -264,6 +328,16 @@ impl Session {
         Ok(results)
     }
 
+    /// Executes a command on a specific server.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_addr` - The address of the server to execute the command on
+    /// * `cmd` - The command to execute
+    ///
+    /// # Returns
+    ///
+    /// The result of the command execution
     async fn execute(&mut self, server_addr: &str, cmd: Command) -> Result<CommandResult> {
         match &mut self.client {
             Client::Remote { txs, rxs } => {
@@ -290,6 +364,7 @@ impl Session {
                 Ok(cmd_result)
             }
             Client::DryRun => {
+                // In dry run mode, just log the command and return a fake result
                 println!("[{}] Command on server {}", self.name, server_addr);
                 for op in &cmd.ops {
                     println!("\t{} {:?}", op.name, op.args);
