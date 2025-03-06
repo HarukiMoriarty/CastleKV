@@ -27,6 +27,8 @@ The key-value store supports the following operations:
 - `SCAN <start_key> <end_key>`: Retrieve keys and values within a range
 - `STOP`: Gracefully terminate the client
 
+NOTICE: we only support key with type `u64` or prefix with `usertable_user`.
+
 ## Getting Started
 
 ### Running the Server
@@ -67,7 +69,7 @@ cargo run --release --bin client -- [OPTIONS]
 
 - `--connect-addr <CONNECT_ADDR>`  The address to connect to [default: 0.0.0.0:24000]
 
-### Running the Benchmark
+### Running the Benchmark (Std In/Out)
 
 ```bash
 cargo run --release --bin benchmark -- [OPTIONS]
