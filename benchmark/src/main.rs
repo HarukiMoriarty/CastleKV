@@ -1,9 +1,10 @@
 use clap::Parser;
-use common::{init_tracing, set_default_rust_log, Session};
-use rpc::gateway::{CommandResult, Status};
 use std::fmt::Display;
 use std::io::{self, BufRead};
 use tracing::error;
+
+use common::{extract_key_number, form_key, init_tracing, set_default_rust_log, Session};
+use rpc::gateway::{CommandResult, Status};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -148,8 +149,8 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
                 }
 
                 // Process SCAN operation result
-                let mut min_start_key = String::new();
-                let mut max_end_key = String::new();
+                let mut min_start_key = None;
+                let mut max_end_key = None;
                 let mut scan_entries = Vec::new();
 
                 // Process all results to find boundaries and collect entries
@@ -167,17 +168,17 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
                     if !lines.is_empty() && lines[0].trim().starts_with("SCAN ") {
                         let parts: Vec<&str> = lines[0].split_whitespace().collect();
                         if parts.len() >= 3 {
-                            let start_key = parts[1].to_string();
-                            let end_key = parts[2].to_string();
+                            let start_key = extract_key_number(parts[1]);
+                            let end_key = extract_key_number(parts[2]);
 
                             // Update min start key
-                            if min_start_key.is_empty() || start_key < min_start_key {
-                                min_start_key = start_key;
+                            if min_start_key.is_none() || start_key < min_start_key.unwrap() {
+                                min_start_key = Some(start_key);
                             }
 
                             // Update max end key
-                            if max_end_key.is_empty() || end_key > max_end_key {
-                                max_end_key = end_key;
+                            if max_end_key.is_none() || end_key > max_end_key.unwrap() {
+                                max_end_key = Some(end_key);
                             }
                         }
                     }
@@ -193,9 +194,16 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
 
                 // Format the combined scan result
                 let mut scan_result = Vec::new();
-                scan_result.push(format!("SCAN {} {} BEGIN", min_start_key, max_end_key));
-
-                // Add collected entries
+                scan_result.push(format!(
+                    "SCAN {} {} BEGIN",
+                    form_key(min_start_key.unwrap()),
+                    form_key(max_end_key.unwrap())
+                ));
+                scan_entries.sort_by(|a, b| {
+                    let a_num: u64 = extract_key_number(a.split_whitespace().nth(0).unwrap());
+                    let b_num: u64 = extract_key_number(b.split_whitespace().nth(0).unwrap());
+                    a_num.cmp(&b_num)
+                });
                 for entry in scan_entries {
                     scan_result.push(entry);
                 }

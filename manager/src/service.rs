@@ -51,7 +51,7 @@ impl Manager {
             let server_addr = &self.server_addresses[i];
             assignments.insert(server_addr.clone(), (start_key, end_key));
             info!(
-                "Server {} assigned partition range: key{} to key{}",
+                "Server {} assigned partition range: {} to {}",
                 server_addr, start_key, end_key
             );
         }
@@ -76,8 +76,8 @@ impl ManagerService for Manager {
                 );
 
                 Ok(Response::new(RegisterServerResponse {
-                    start_key: format!("key{}", start_key),
-                    end_key: format!("key{}", end_key),
+                    start_key: *start_key,
+                    end_key: *end_key,
                     has_err: false,
                 }))
             }
@@ -85,8 +85,8 @@ impl ManagerService for Manager {
                 error!("Unknown server tried to register: {}", server_address);
 
                 Ok(Response::new(RegisterServerResponse {
-                    start_key: String::new(),
-                    end_key: String::new(),
+                    start_key: 0,
+                    end_key: 0,
                     has_err: true,
                 }))
             }
@@ -103,8 +103,8 @@ impl ManagerService for Manager {
         for (server_addr, (start_key, end_key)) in assignments.iter() {
             partitions.push(PartitionInfo {
                 server_address: server_addr.clone(),
-                start_key: format!("key{}", start_key),
-                end_key: format!("key{}", end_key),
+                start_key: *start_key,
+                end_key: *end_key,
             });
         }
 

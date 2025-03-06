@@ -38,6 +38,43 @@ struct Cli {
     batch_timeout: Option<u64>,
 }
 
+impl Cli {
+    fn validate(&self) -> Result<(), String> {
+        if self.persistence {
+            // When persistence is true, db_path, batch_size, and batch_timeout must be set
+            if self.db_path.is_none() {
+                return Err("db_path must be specified when persistence is enabled".to_string());
+            }
+            if self.batch_size.is_none() {
+                return Err("batch_size must be specified when persistence is enabled".to_string());
+            }
+            if self.batch_timeout.is_none() {
+                return Err(
+                    "batch_timeout must be specified when persistence is enabled".to_string(),
+                );
+            }
+        } else {
+            // When persistence is false, db_path, batch_size, and batch_timeout must be None
+            if self.db_path.is_some() {
+                return Err(
+                    "db_path must not be specified when persistence is disabled".to_string()
+                );
+            }
+            if self.batch_size.is_some() {
+                return Err(
+                    "batch_size must not be specified when persistence is disabled".to_string(),
+                );
+            }
+            if self.batch_timeout.is_some() {
+                return Err(
+                    "batch_timeout must not be specified when persistence is disabled".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 impl From<Cli> for ServerConfig {
     fn from(cli: Cli) -> Self {
         ServerConfig::builder()
@@ -58,6 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let cli = Cli::parse();
+    if let Err(err) = cli.validate() {
+        return Err(err.into());
+    }
     let config = ServerConfig::from(cli);
     info!("{:#?}", config);
 

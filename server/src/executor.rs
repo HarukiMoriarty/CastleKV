@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
-use common::{CommandId, NodeId};
+use common::{extract_key_number, form_key, CommandId, NodeId};
 
 pub type ExecutorSender = mpsc::UnboundedSender<ExecutorMessage>;
 type ExecutorReceiver = mpsc::UnboundedReceiver<ExecutorMessage>;
@@ -181,14 +181,13 @@ impl Executor {
                 }
                 "SCAN" => {
                     if op.args.len() >= 2 {
-                        if let (Some(start_num), Some(end_num)) = (
-                            Self::extract_key_number(&op.args[0]),
-                            Self::extract_key_number(&op.args[1]),
-                        ) {
-                            for num in start_num..=end_num {
-                                if !write_set.contains(&format!("usertable_user{}", num)) {
-                                    read_set.insert(format!("usertable_user{}", num));
-                                }
+                        let (start_num, end_num) = (
+                            extract_key_number(&op.args[0]),
+                            extract_key_number(&op.args[1]),
+                        );
+                        for num in start_num..=end_num {
+                            if !write_set.contains(&form_key(num)) {
+                                read_set.insert(form_key(num));
                             }
                         }
                     }
@@ -198,10 +197,5 @@ impl Executor {
         }
 
         (read_set, write_set)
-    }
-
-    fn extract_key_number(key: &str) -> Option<u32> {
-        key.strip_prefix("usertable_user")
-            .and_then(|num_str| num_str.parse().ok())
     }
 }

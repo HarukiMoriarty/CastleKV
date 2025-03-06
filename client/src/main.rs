@@ -1,11 +1,12 @@
 use clap::Parser;
-use common::{init_tracing, set_default_rust_log, Session};
-use rpc::gateway::{CommandResult, OperationResult, Status};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Instant;
+
+use common::{extract_key_number, form_key, init_tracing, set_default_rust_log, Session};
+use rpc::gateway::{CommandResult, OperationResult, Status};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -39,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         let readline = rl.readline(&get_prompt(&mut session));
         match readline {
             Ok(line) => {
-                let tokens = tokenize(&line);
+                let mut tokens = tokenize(&line);
                 if tokens.is_empty() || tokens[0].is_empty() {
                     continue;
                 }
@@ -49,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
                 // Process commands based on the first token
                 let output = match tokens[0].to_lowercase().as_str() {
                     "cmd" => handle_cmd(&mut session, &tokens),
-                    "op" => handle_op(&mut session, &tokens).await,
+                    "op" => handle_op(&mut session, &mut tokens).await,
                     "done" => handle_done(&mut session, &tokens).await,
                     "time" => {
                         measure_time = !measure_time;
@@ -175,10 +176,38 @@ fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
 /// Add an operation to the current command
 ///
 /// If no command is in progress, creates a new one and executes it immediately.
-async fn handle_op(session: &mut Session, tokens: &[String]) -> String {
-    if tokens.len() < 2 {
-        return error("invalid operation");
+async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
+    match tokens[1].as_str() {
+        "get" | "delete" => {
+            if tokens.len() != 3 {
+                return error("invalid operation");
+            }
+            if !tokens[2].starts_with("usertable_user") {
+                tokens[2] = format!("usertable_user{}", tokens[2]);
+            }
+        }
+        "swap" | "put" => {
+            if tokens.len() != 4 {
+                return error("invalid operation");
+            }
+            if !tokens[2].starts_with("usertable_user") {
+                tokens[2] = format!("usertable_user{}", tokens[2]);
+            }
+        }
+        "scan" => {
+            if tokens.len() != 4 {
+                return error("invalid operation");
+            }
+            if !tokens[2].starts_with("usertable_user") {
+                tokens[2] = format!("usertable_user{}", tokens[2]);
+            }
+            if !tokens[3].starts_with("usertable_user") {
+                tokens[3] = format!("usertable_user{}", tokens[3]);
+            }
+        }
+        _ => unreachable!(),
     }
+
     let execute_immediately = session.get_next_op_id().is_none();
     if execute_immediately {
         session.new_command().unwrap();
@@ -207,17 +236,6 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
     result.map_or_else(error, |cmd_results| {
         let mut output = Vec::new();
 
-        // Combine command content from all results
-        let combined_content: String = cmd_results
-            .iter()
-            .map(|res| res.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if !combined_content.is_empty() {
-            output.push(combined_content);
-        }
-
         // Collect all operations from all results
         let mut all_op_results = Vec::new();
         for cmd_result in &cmd_results {
@@ -245,8 +263,8 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
 
             if is_scan {
                 // Find min start key and max end key across all partitions
-                let mut min_start_key = String::new();
-                let mut max_end_key = String::new();
+                let mut min_start_key = None;
+                let mut max_end_key = None;
                 let mut scan_data = Vec::new();
                 let scan_has_err = results.iter().any(|o| o.has_err);
 
@@ -256,17 +274,17 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                         if first_line.trim().starts_with("SCAN ") {
                             let parts: Vec<&str> = first_line.split_whitespace().collect();
                             if parts.len() >= 3 {
-                                let start_key = parts[1].to_string();
-                                let end_key = parts[2].to_string();
+                                let start_key = extract_key_number(parts[1]);
+                                let end_key = extract_key_number(parts[2]);
 
                                 // Update min start key
-                                if min_start_key.is_empty() || start_key < min_start_key {
-                                    min_start_key = start_key;
+                                if min_start_key.is_none() || start_key < min_start_key.unwrap() {
+                                    min_start_key = Some(start_key);
                                 }
 
                                 // Update max end key
-                                if max_end_key.is_empty() || end_key > max_end_key {
-                                    max_end_key = end_key;
+                                if max_end_key.is_none() || end_key > max_end_key.unwrap() {
+                                    max_end_key = Some(end_key);
                                 }
                             }
                         }
@@ -283,7 +301,16 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
 
                 // Format scan results
                 let mut scan_output = Vec::new();
-                scan_output.push(format!("SCAN {} {} BEGIN", min_start_key, max_end_key));
+                scan_output.push(format!(
+                    "SCAN {} {} BEGIN",
+                    form_key(min_start_key.unwrap()),
+                    form_key(max_end_key.unwrap())
+                ));
+                scan_data.sort_by(|a, b| {
+                    let a_num: u64 = extract_key_number(a.split_whitespace().nth(0).unwrap());
+                    let b_num: u64 = extract_key_number(b.split_whitespace().nth(0).unwrap());
+                    a_num.cmp(&b_num)
+                });
                 for data_line in scan_data {
                     scan_output.push(format!("  {}", data_line));
                 }

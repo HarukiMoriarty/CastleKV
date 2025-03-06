@@ -1,7 +1,4 @@
-use crate::{metadata, CommandId};
 use anyhow::{bail, ensure, Context, Result};
-use rpc::gateway::db_client::DbClient;
-use rpc::gateway::{Command, CommandResult, Operation, Status};
 use rpc::manager::manager_service_client::ManagerServiceClient;
 use rpc::manager::{GetPartitionMapRequest, PartitionInfo};
 use std::collections::HashMap;
@@ -9,6 +6,10 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
+
+use super::{extract_key_number, form_key, metadata, CommandId};
+use rpc::gateway::db_client::DbClient;
+use rpc::gateway::{Command, CommandResult, Operation, Status};
 
 /// Client connection state.
 enum Client {
@@ -128,22 +129,14 @@ impl Session {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to look up (add "key" prefix if not present)
+    /// * `key` - The key to look up
     ///
     /// # Returns
     ///
     /// The server address responsible for the key, or None if no server is found
-    fn get_server_for_key(&self, key: &str) -> Option<&str> {
-        let key_value = {
-            if key.starts_with("key") {
-                key.to_string()
-            } else {
-                format!("key{}", key)
-            }
-        };
-
+    fn get_server_for_key(&self, key: u64) -> Option<&str> {
         for partition in &self.partition_info {
-            if key_value >= partition.start_key && key_value <= partition.end_key {
+            if key >= partition.start_key && key <= partition.end_key {
                 return Some(&partition.server_address);
             }
         }
@@ -175,12 +168,7 @@ impl Session {
     ///
     /// The next operation ID, or None if no command is in progress
     pub fn get_next_op_id(&mut self) -> Option<u32> {
-        if let Some(next_op_id) = self.next_op_id {
-            self.next_op_id = Some(next_op_id + 1);
-            Some(next_op_id)
-        } else {
-            None
-        }
+        self.next_op_id
     }
 
     /// Adds an operation to the current command.
@@ -206,7 +194,7 @@ impl Session {
 
         // Handle single-key operations
         if (name == "get" || name == "del" || name == "put" || name == "swap") && !args.is_empty() {
-            let key = &args[0];
+            let key = extract_key_number(&args[0]);
             let server_addr = self
                 .get_server_for_key(key)
                 .map(|s| s.to_string())
@@ -235,8 +223,8 @@ impl Session {
         }
         // Handle scan operations that might span multiple partitions
         else if name == "scan" && args.len() >= 2 {
-            let start_key = &args[0];
-            let end_key = &args[1];
+            let start_key = extract_key_number(&args[0]);
+            let end_key = extract_key_number(&args[1]);
 
             // Check if start and end are valid
             if start_key > end_key {
@@ -250,24 +238,24 @@ impl Session {
 
             for partition in &self.partition_info {
                 // Check if scan range overlaps with this partition
-                if !(*end_key < partition.start_key || *start_key > partition.end_key) {
+                if !(end_key < partition.start_key || start_key > partition.end_key) {
                     added_to_any_server = true;
 
                     // Calculate effective range for this partition (intersection of request and partition range)
-                    let effective_start = if *start_key > partition.start_key {
+                    let effective_start = if start_key > partition.start_key {
                         start_key.clone()
                     } else {
                         partition.start_key.clone()
                     };
 
-                    let effective_end = if *end_key < partition.end_key {
+                    let effective_end = if end_key < partition.end_key {
                         end_key.clone()
                     } else {
                         partition.end_key.clone()
                     };
 
                     // Create a new scan operation for this partition
-                    let scan_args = vec![effective_start, effective_end];
+                    let scan_args = vec![form_key(effective_start), form_key(effective_end)];
 
                     let op = Operation {
                         id,
@@ -301,6 +289,9 @@ impl Session {
 
     /// Finishes the current command and executes it on all relevant servers.
     ///
+    /// This implementation optimizes command execution by sending all commands
+    /// to their respective servers first, then collecting results.
+    ///
     /// If no existing command builder previously created by [`new_command`](Self::new_command)
     /// exists, returns an error.
     ///
@@ -313,68 +304,64 @@ impl Session {
         };
         self.next_op_id = None;
 
-        let mut results = Vec::new();
-
-        // Execute commands on each relevant server
-        for (server_addr, cmd) in cmds {
-            if cmd.ops.is_empty() {
-                continue;
-            }
-
-            let result = self.execute(&server_addr, cmd).await?;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    /// Executes a command on a specific server.
-    ///
-    /// # Arguments
-    ///
-    /// * `server_addr` - The address of the server to execute the command on
-    /// * `cmd` - The command to execute
-    ///
-    /// # Returns
-    ///
-    /// The result of the command execution
-    async fn execute(&mut self, server_addr: &str, cmd: Command) -> Result<CommandResult> {
         match &mut self.client {
             Client::Remote { txs, rxs } => {
-                // Get the sender and receiver for this server
-                let tx = txs
-                    .get(server_addr)
-                    .context(format!("No tx for server: {}", server_addr))?;
-                let rx = rxs
-                    .get_mut(server_addr)
-                    .context(format!("No rx for server: {}", server_addr))?;
+                // Phase 1: Send all commands to their respective servers without waiting for results
+                for (server_addr, cmd) in &cmds {
+                    // Get the sender for this server
+                    let tx = txs
+                        .get(server_addr)
+                        .context(format!("No tx for server: {}", server_addr))?;
 
-                // Send the command to the executor
-                tx.send(cmd).await.context("Failed to send command")?;
+                    // Send the command without waiting for the result
+                    tx.send(cmd.clone())
+                        .await
+                        .context(format!("Failed to send command to server: {}", server_addr))?;
+                }
 
-                // Wait for the result
-                let Some(cmd_result) = rx.next().await else {
-                    bail!("connection to server {} closed", server_addr);
-                };
+                // Phase 2: Collect results from all servers
+                let mut results = Vec::new();
+                for (server_addr, _) in cmds {
+                    let rx = rxs
+                        .get_mut(&server_addr)
+                        .context(format!("No rx for server: {}", server_addr))?;
 
-                let cmd_result = cmd_result.context(format!(
-                    "Failed to receive result from server: {}",
-                    server_addr
-                ))?;
-                Ok(cmd_result)
+                    let Some(cmd_result) = rx.next().await else {
+                        bail!("connection to server {} closed", server_addr);
+                    };
+
+                    let cmd_result = cmd_result.context(format!(
+                        "Failed to receive result from server: {}",
+                        server_addr
+                    ))?;
+
+                    results.push(cmd_result);
+                }
+
+                Ok(results)
             }
             Client::DryRun => {
-                // In dry run mode, just log the command and return a fake result
-                println!("[{}] Command on server {}", self.name, server_addr);
-                for op in &cmd.ops {
-                    println!("\t{} {:?}", op.name, op.args);
+                // In dry run mode, just log the commands and return simulated results
+                let mut results = Vec::new();
+                for (server_addr, cmd) in cmds {
+                    if cmd.ops.is_empty() {
+                        continue;
+                    }
+
+                    println!("[{}] Command on server {}", self.name, server_addr);
+                    for op in &cmd.ops {
+                        println!("\t{} {:?}", op.name, op.args);
+                    }
+                    println!();
+
+                    results.push(CommandResult {
+                        status: Status::Committed.into(),
+                        content: format!("dry-run on server {}", server_addr),
+                        ..Default::default()
+                    });
                 }
-                println!();
-                Ok(CommandResult {
-                    status: Status::Committed.into(),
-                    content: format!("dry-run on server {}", server_addr),
-                    ..Default::default()
-                })
+
+                Ok(results)
             }
         }
     }

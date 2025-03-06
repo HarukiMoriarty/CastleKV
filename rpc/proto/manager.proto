@@ -14,8 +14,8 @@ message RegisterServerRequest {
 }
 
 message RegisterServerResponse {
-  string start_key = 1;
-  string end_key = 2;
+  uint64 start_key = 1;
+  uint64 end_key = 2;
   bool has_err = 3;
 }
 
@@ -25,8 +25,8 @@ message GetPartitionMapRequest {
 
 message PartitionInfo {
   string server_address = 1;
-  string start_key = 2;
-  string end_key = 3;
+  uint64 start_key = 2;
+  uint64 end_key = 3;
 }
 
 message GetPartitionMapResponse {
