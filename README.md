@@ -42,6 +42,7 @@ cargo run --release --bin server -- [OPTIONS]
 - `--node-id <NODE_ID>`             Id of the current node [default: 0]
 - `--listen-addr <LISTEN_ADDR>`      The address to listen on [default: 0.0.0.0:23000]
 - `--db-path <DB_PATH>`              Directory path for database files
+- `--log-path <LOG_PATH>`            Directory path for log files, e.g. `log<NODE_ID>`
 - `--manager-addr <MANAGER_ADDR>`    Address of the manager [default: 0.0.0.0:24000]
 - `--persistence`                    Enable database persistence
 - `--batch-size <BATCH_SIZE>`        Batch size for write operations before flushing to disk
@@ -93,5 +94,6 @@ The client provides an interactive terminal where you can:
 
 ## TODO List
 
-- [ ] Implement log manager
+- [x] Implement log manager
 - [ ] Add support for replicas (Rafe)
+- [ ] Implement server recovery from log
