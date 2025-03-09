@@ -193,7 +193,9 @@ impl Session {
         };
 
         // Handle single-key operations
-        if (name == "get" || name == "del" || name == "put" || name == "swap") && !args.is_empty() {
+        if (name == "get" || name == "delete" || name == "put" || name == "swap")
+            && !args.is_empty()
+        {
             let key = extract_key_number(&args[0]);
             let server_addr = self
                 .get_server_for_key(key)
