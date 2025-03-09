@@ -12,7 +12,7 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "0.0.0.0:23000",
+        default_value = "0.0.0.0:24000",
         help = "The address to connect to."
     )]
     connect_addr: String,

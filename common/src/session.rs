@@ -193,7 +193,7 @@ impl Session {
         };
 
         // Handle single-key operations
-        if (name == "get" || name == "delete" || name == "put" || name == "swap")
+        if (name == "GET" || name == "DELETE" || name == "PUT" || name == "SWAP")
             && !args.is_empty()
         {
             let key = extract_key_number(&args[0]);
@@ -224,7 +224,7 @@ impl Session {
             cmd.ops.push(op);
         }
         // Handle scan operations that might span multiple partitions
-        else if name == "scan" && args.len() >= 2 {
+        else if name == "SCAN" && args.len() >= 2 {
             let start_key = extract_key_number(&args[0]);
             let end_key = extract_key_number(&args[1]);
 
