@@ -307,8 +307,8 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                     form_key(max_end_key.unwrap())
                 ));
                 scan_data.sort_by(|a, b| {
-                    let a_num: u64 = extract_key_number(a.split_whitespace().nth(0).unwrap());
-                    let b_num: u64 = extract_key_number(b.split_whitespace().nth(0).unwrap());
+                    let a_num: u64 = extract_key_number(a.split_whitespace().next().unwrap());
+                    let b_num: u64 = extract_key_number(b.split_whitespace().next().unwrap());
                     a_num.cmp(&b_num)
                 });
                 for data_line in scan_data {

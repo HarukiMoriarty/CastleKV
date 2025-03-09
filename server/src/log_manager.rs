@@ -3,9 +3,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write, Read, Seek, SeekFrom};
 use std::path::Path;
 use bincode;
-use rpc::gateway::Operation;
 use common::CommandId;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 pub type LogManagerSender = UnboundedSender<LogManagerMessage>;
@@ -155,9 +154,9 @@ impl LogManager {
     pub async fn run(mut self) {
         let mut rx = self.rx;
 
-        loop {
-            match rx.recv().await {
-                Some(LogManagerMessage::AppendEntry { term, index, ops, cmd_id, resp_tx }) => {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                LogManagerMessage::AppendEntry { term, index, ops, cmd_id, resp_tx } => {
                     let entry = LogEntry {
                         term,
                         index,
@@ -191,10 +190,6 @@ impl LogManager {
                     }
                     let _ = resp_tx.send(());
                 },
-                None => {
-                    // Channel closed, exit the loop
-                    break;
-                }
             }
         }
     }

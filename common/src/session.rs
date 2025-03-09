@@ -245,15 +245,15 @@ impl Session {
 
                     // Calculate effective range for this partition (intersection of request and partition range)
                     let effective_start = if start_key > partition.start_key {
-                        start_key.clone()
+                        start_key
                     } else {
-                        partition.start_key.clone()
+                        partition.start_key
                     };
 
                     let effective_end = if end_key < partition.end_key {
-                        end_key.clone()
+                        end_key
                     } else {
-                        partition.end_key.clone()
+                        partition.end_key
                     };
 
                     // Create a new scan operation for this partition

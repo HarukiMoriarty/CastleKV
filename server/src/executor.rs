@@ -85,7 +85,7 @@ impl Executor {
                                     // Request locks
                                     if lock_manager_tx
                                         .send(LockManagerMessage::AcquireLocks {
-                                            cmd_id: cmd_id.clone(),
+                                            cmd_id,
                                             lock_requests,
                                             resp_tx: lock_resp_tx,
                                         })
@@ -99,7 +99,7 @@ impl Executor {
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
                                             // Append log entry
-                                            Self::append_raft_log(cmd.clone(), cmd_id.clone(), log_manager_tx.clone()).await;
+                                            Self::append_raft_log(cmd.clone(), cmd_id, log_manager_tx.clone()).await;
 
                                             // TODO: raft consensus
 
@@ -220,12 +220,7 @@ impl Executor {
             let op_name = op.name.clone();
             let op_args = op.args.clone();
             
-            if op_name == "PUT" {
-                let key = op_args[0].clone();
-                let value = op_args[1].clone();
-                log_ops.push((key, value));
-            }
-            else if op_name == "SWAP" {
+            if op_name == "PUT" || op_name == "SWAP" {
                 let key = op_args[0].clone();
                 let value = op_args[1].clone();
                 log_ops.push((key, value));
