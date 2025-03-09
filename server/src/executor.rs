@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
+use crate::log_manager::{LogManagerMessage, LogManagerSender};
 use common::{extract_key_number, form_key, CommandId, NodeId};
 
 pub type ExecutorSender = mpsc::UnboundedSender<ExecutorMessage>;
@@ -24,6 +25,7 @@ pub enum ExecutorMessage {
 pub struct Executor {
     node_id: NodeId,
     rx: ExecutorReceiver,
+    log_manager_tx: LogManagerSender,
     lock_manager_tx: LockManagerSender,
     cmd_cnt: Arc<AtomicU32>,
     db: Arc<KeyValueDb>,
@@ -33,12 +35,14 @@ impl Executor {
     pub fn new(
         node_id: NodeId,
         rx: ExecutorReceiver,
+        log_manager_tx: LogManagerSender,
         lock_manager_tx: LockManagerSender,
         db: Arc<KeyValueDb>,
     ) -> Self {
         Self {
             node_id,
             rx,
+            log_manager_tx,
             lock_manager_tx,
             cmd_cnt: Arc::new(AtomicU32::new(1)),
             db,
@@ -51,6 +55,7 @@ impl Executor {
                 ExecutorMessage::NewClient { stream, result_tx } => {
                     debug!("Executor: handling new client");
 
+                    let log_manager_tx = self.log_manager_tx.clone();
                     let lock_manager_tx = self.lock_manager_tx.clone();
                     let cmd_cnt = Arc::clone(&self.cmd_cnt);
                     let db = Arc::clone(&self.db);
@@ -80,7 +85,7 @@ impl Executor {
                                     // Request locks
                                     if lock_manager_tx
                                         .send(LockManagerMessage::AcquireLocks {
-                                            cmd_id,
+                                            cmd_id: cmd_id.clone(),
                                             lock_requests,
                                             resp_tx: lock_resp_tx,
                                         })
@@ -93,6 +98,11 @@ impl Executor {
                                     // Wait for lock response
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
+                                            // Append log entry
+                                            Self::append_raft_log(cmd.clone(), cmd_id.clone(), log_manager_tx.clone()).await;
+
+                                            // TODO: raft consensus
+
                                             // Locks acquired successfully
                                             let mut ops_results = Vec::new();
 
@@ -197,5 +207,46 @@ impl Executor {
         }
 
         (read_set, write_set)
+    }
+
+    async fn append_raft_log(cmd: Command, cmd_id: CommandId, log_manager_tx: LogManagerSender) {
+        // TODO: get <Term, Index> from raft state
+        let term = 0;
+        let index = 0;
+        let mut log_ops: Vec<(String, String)> = Vec::new();
+        let (log_resp_tx, log_resp_rx) = oneshot::channel();
+
+        for op in cmd.ops.iter() {
+            let op_name = op.name.clone();
+            let op_args = op.args.clone();
+            
+            if op_name == "PUT" {
+                let key = op_args[0].clone();
+                let value = op_args[1].clone();
+                log_ops.push((key, value));
+            }
+            else if op_name == "SWAP" {
+                let key = op_args[0].clone();
+                let value = op_args[1].clone();
+                log_ops.push((key, value));
+            }
+            else if op_name == "DELETE" {
+                let key = op_args[0].clone();
+                log_ops.push((key, "NULL".to_string()));
+            }
+        }
+
+        let log_req = LogManagerMessage::AppendEntry {
+            term,
+            index,
+            cmd_id,
+            ops: log_ops,
+            resp_tx: log_resp_tx,
+        };
+
+        log_manager_tx.send(log_req).unwrap();
+
+        // Wait for log response sync to ensure log entry is persisted
+        let _ = log_resp_rx.await;
     }
 }

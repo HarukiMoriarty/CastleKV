@@ -16,3 +16,5 @@ tonic.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"

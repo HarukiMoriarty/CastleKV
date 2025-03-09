@@ -13,6 +13,9 @@ pub struct ServerConfig {
     /// Directory path for database files
     pub db_path: Option<PathBuf>,
 
+    /// Directory path for log files
+    pub log_path: Option<PathBuf>,
+
     /// Address of the manager
     pub manager_addr: String,
 
@@ -32,6 +35,7 @@ impl Default for ServerConfig {
             node_id: NodeId(0),
             listen_addr: "0.0.0.0:23000".to_string(),
             db_path: None,
+            log_path: None,
             manager_addr: "0.0.0.0:24000".to_string(),
             persistence_enabled: false,
             batch_size: None,
@@ -76,6 +80,11 @@ impl ServerConfigBuilder {
 
     pub fn db_path(mut self, path: Option<PathBuf>) -> Self {
         self.config.db_path = path;
+        self
+    }
+
+    pub fn log_path(mut self, path: Option<PathBuf>) -> Self {
+        self.config.log_path = path;
         self
     }
 

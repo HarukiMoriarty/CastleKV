@@ -22,6 +22,9 @@ struct Cli {
     #[arg(long, short, help = "Directory path for database files")]
     db_path: Option<PathBuf>,
 
+    #[arg(long, help = "Directory path for log files")]
+    log_path: Option<PathBuf>,
+
     #[arg(long, default_value = "0.0.0.0:24000", help = "Address of the manager")]
     manager_addr: String,
 
@@ -81,6 +84,7 @@ impl From<Cli> for ServerConfig {
             .node_id(cli.node_id)
             .listen_addr(cli.listen_addr)
             .db_path(cli.db_path)
+            .log_path(cli.log_path)
             .manager_addr(cli.manager_addr)
             .persistence_enabled(cli.persistence)
             .batch_size(cli.batch_size)
