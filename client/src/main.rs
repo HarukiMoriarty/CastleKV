@@ -177,8 +177,8 @@ fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
 ///
 /// If no command is in progress, creates a new one and executes it immediately.
 async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
-    match tokens[1].as_str() {
-        "get" | "delete" => {
+    match tokens[1].to_uppercase().as_str() {
+        "GET" | "DELETE" => {
             if tokens.len() != 3 {
                 return error("invalid operation");
             }
@@ -186,7 +186,7 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
                 tokens[2] = format!("usertable_user{}", tokens[2]);
             }
         }
-        "swap" | "put" => {
+        "SWAP" | "PUT" => {
             if tokens.len() != 4 {
                 return error("invalid operation");
             }
@@ -194,7 +194,7 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
                 tokens[2] = format!("usertable_user{}", tokens[2]);
             }
         }
-        "scan" => {
+        "SCAN" => {
             if tokens.len() != 4 {
                 return error("invalid operation");
             }
@@ -213,7 +213,7 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
         session.new_command().unwrap();
     }
     let next_op_id = session.get_next_op_id().unwrap();
-    session.add_operation(&tokens[1], &tokens[2..]).unwrap();
+    session.add_operation(&tokens[1].to_uppercase(), &tokens[2..]).unwrap();
     if execute_immediately {
         format_result(session.finish_command().await)
     } else {
