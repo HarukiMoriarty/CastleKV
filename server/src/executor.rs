@@ -99,9 +99,14 @@ impl Executor {
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
                                             // Append log entry
-                                            Self::append_raft_log(cmd.clone(), cmd_id, log_manager_tx.clone()).await;
+                                            Self::append_raft_log(
+                                                cmd.clone(),
+                                                cmd_id,
+                                                &log_manager_tx,
+                                            )
+                                            .await;
 
-                                            // TODO: raft consensus
+                                            // TODO: raft consensus done in log manager
 
                                             // Locks acquired successfully
                                             let mut ops_results = Vec::new();
@@ -209,7 +214,7 @@ impl Executor {
         (read_set, write_set)
     }
 
-    async fn append_raft_log(cmd: Command, cmd_id: CommandId, log_manager_tx: LogManagerSender) {
+    async fn append_raft_log(cmd: Command, cmd_id: CommandId, log_manager_tx: &LogManagerSender) {
         // TODO: get <Term, Index> from raft state
         let term = 0;
         let index = 0;
@@ -219,13 +224,12 @@ impl Executor {
         for op in cmd.ops.iter() {
             let op_name = op.name.clone();
             let op_args = op.args.clone();
-            
+
             if op_name == "PUT" || op_name == "SWAP" {
                 let key = op_args[0].clone();
                 let value = op_args[1].clone();
                 log_ops.push((key, value));
-            }
-            else if op_name == "DELETE" {
+            } else if op_name == "DELETE" {
                 let key = op_args[0].clone();
                 log_ops.push((key, "NULL".to_string()));
             }

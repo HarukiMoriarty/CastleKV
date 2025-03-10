@@ -213,7 +213,9 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
         session.new_command().unwrap();
     }
     let next_op_id = session.get_next_op_id().unwrap();
-    session.add_operation(&tokens[1].to_uppercase(), &tokens[2..]).unwrap();
+    session
+        .add_operation(&tokens[1].to_uppercase(), &tokens[2..])
+        .unwrap();
     if execute_immediately {
         format_result(session.finish_command().await)
     } else {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::{fmt, mem, str};
 use std::str::FromStr;
+use std::{fmt, mem, str};
 
 macro_rules! primitive_id {
     ($name:ident, $repr_type:ty) => {
@@ -131,11 +131,14 @@ impl str::FromStr for CommandId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.trim_matches(|c| c == '(' || c == ')').split(',').collect();
+        let parts: Vec<&str> = s
+            .trim_matches(|c| c == '(' || c == ')')
+            .split(',')
+            .collect();
         if parts.len() != 2 {
             anyhow::bail!("Invalid CommandId format");
         }
-        
+
         let node_id = NodeId::from_str(parts[0])?;
         let counter = parts[1].parse()?;
         Ok(CommandId::new(node_id, counter))

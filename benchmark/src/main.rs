@@ -45,12 +45,7 @@ async fn main() -> anyhow::Result<()> {
                     error!("PUT <key> <value>");
                     continue;
                 }
-                let output = execute_command(
-                    &mut session,
-                    tokens[0].to_uppercase().as_str(),
-                    &tokens[1..],
-                )
-                .await;
+                let output = execute_command(&mut session, tokens[0].as_str(), &tokens[1..]).await;
                 println!("{}", output);
             }
             "GET" | "DELETE" => {
@@ -58,12 +53,7 @@ async fn main() -> anyhow::Result<()> {
                     error!("GET <key>");
                     continue;
                 }
-                let output = execute_command(
-                    &mut session,
-                    tokens[0].to_uppercase().as_str(),
-                    &tokens[1..],
-                )
-                .await;
+                let output = execute_command(&mut session, tokens[0].as_str(), &tokens[1..]).await;
                 println!("{}", output);
             }
             "STOP" => {
