@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::comm::StorageMessage;
+use crate::storage::StorageMessage;
 
 pub struct KeyValueDb {
     memory_db: Arc<RwLock<BTreeMap<String, String>>>,
