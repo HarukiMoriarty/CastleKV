@@ -1442,6 +1442,7 @@ dependencies = [
  "bincode",
  "clap",
  "common",
+ "glob",
  "rpc",
  "serde",
  "sled",

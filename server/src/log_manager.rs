@@ -1,12 +1,17 @@
 use bincode;
+use common::CommandId;
+use glob;
+use rpc::gateway::Operation;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
+use tracing::{debug, error, info};
 
-use common::CommandId;
+use crate::database::KeyValueDb;
 
 pub type LogManagerSender = UnboundedSender<LogManagerMessage>;
 type LogManagerReceiver = UnboundedReceiver<LogManagerMessage>;
@@ -79,13 +84,71 @@ pub struct RaftLog {
 }
 
 impl RaftLog {
-    /// Initializes the log manager, loads existing segments or creates a new one
+    /// Opens or creates a log, handling recovery automatically
     pub fn open(base_path: &str, max_segment_size: usize) -> io::Result<Self> {
-        // For simplicity, directly create a new segment file
-        let segment_path = format!("{}/raft_log_segment_0.log", base_path);
-        let current_segment = Segment::new(&segment_path, 1)?;
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(base_path)?;
+        
+        // Check for existing segments
+        let log_pattern = format!("{}/raft_log_segment_*.log", base_path);
+        let mut existing_segments: Vec<_> = glob::glob(&log_pattern)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .filter_map(Result::ok)
+            .collect();
+            
+        // Sort segments by their number to ensure correct order
+        existing_segments.sort_by(|a, b| {
+            let a_num = a.to_string_lossy()
+                .split("segment_").nth(1).unwrap_or("0")
+                .split('.').next().unwrap_or("0")
+                .parse::<u64>().unwrap_or(0);
+            let b_num = b.to_string_lossy()
+                .split("segment_").nth(1).unwrap_or("0")
+                .split('.').next().unwrap_or("0")
+                .parse::<u64>().unwrap_or(0);
+            a_num.cmp(&b_num)
+        });
+        
+        let mut segments = Vec::new();
+        let mut last_index = 0;
+        
+        // Load existing segments
+        for segment_path in &existing_segments {
+            let path_str = segment_path.to_string_lossy();
+            // Extract segment number to determine start index
+            let segment_num = path_str
+                .split("segment_").nth(1).unwrap_or("0")
+                .split('.').next().unwrap_or("0")
+                .parse::<u64>().unwrap_or(0);
+                
+            // For the first segment, start index is 1
+            // For others, we'll determine it from the previous segment's entries
+            let start_index = if segment_num == 0 { 1 } else { last_index + 1 };
+            
+            let mut segment = Segment::new(&path_str, start_index)?;
+            
+            // Load entries to determine the last index for the next segment
+            if let Ok(entries) = segment.load_entries() {
+                if let Some(last_entry) = entries.last() {
+                    last_index = last_entry.index;
+                }
+            }
+            
+            segments.push(segment);
+        }
+        
+        // Create or use the last segment as current
+        let current_segment = if segments.is_empty() {
+            // No segments found, create a new one
+            debug!("Creating initial log segment");
+            Segment::new(&format!("{}/raft_log_segment_0.log", base_path), 1)?
+        } else {
+            // Use the last segment as current
+            segments.pop().unwrap()
+        };
+        
         Ok(RaftLog {
-            segments: Vec::new(),
+            segments,
             current_segment,
             base_path: base_path.to_string(),
             max_segment_size,
@@ -139,21 +202,61 @@ pub enum LogManagerMessage {
 pub struct LogManager {
     log: RaftLog,
     rx: LogManagerReceiver,
+    db: Arc<KeyValueDb>,
 }
 
 impl LogManager {
     pub fn new(
         log_path: Option<impl AsRef<Path>>,
         rx: LogManagerReceiver,
+        db: Arc<KeyValueDb>,
         max_segment_size: usize,
     ) -> Self {
         let path_str = log_path
             .as_ref()
             .map(|p| p.as_ref().to_str().unwrap())
             .unwrap_or("raft");
-        let log = RaftLog::open(path_str, max_segment_size).unwrap();
 
-        LogManager { log, rx }
+        // RaftLog::open handles directory creation/recovery
+        let mut log = match RaftLog::open(path_str, max_segment_size) {
+            Ok(log) => {
+                info!("Successfully opened log at {}", path_str);
+                log
+            },
+            Err(e) => {
+                error!("Failed to open log: {}, retrying...", e);
+                RaftLog::open(path_str, max_segment_size).unwrap()
+            }
+        };
+
+        // Load all log entries into in-memory DB and storage
+        let entries = log.load_all_entries().unwrap();
+        info!("Loaded {} log entries", entries.len());
+        for entry in entries {
+            debug!("Log entry: {:?}", entry);
+
+            for op in entry.command.ops {
+                let key = op.0;
+                let value = op.1;
+                let cmd_id = entry.command.cmd_id;
+
+                if value == "NULL" {
+                    db.execute(&Operation { 
+                        id: 0, 
+                        name: "DELETE".to_string(), 
+                        args: vec![key] 
+                    }, cmd_id);
+                } else {
+                    db.execute(&Operation { 
+                        id: 0, 
+                        name: "PUT".to_string(), 
+                        args: vec![key, value] 
+                    }, cmd_id);
+                }
+            }
+        }
+
+        LogManager { log, rx, db }
     }
 
     pub async fn run(mut self) {
@@ -173,6 +276,7 @@ impl LogManager {
                         index,
                         command: LogCommand { cmd_id, ops },
                     };
+                    info!("Appending log entry: {:?}", entry);
 
                     // retry append log entry if failed
                     match self.log.append(entry.clone()) {

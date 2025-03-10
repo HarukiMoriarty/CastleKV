@@ -28,14 +28,9 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     };
     let (log_manager_tx, log_manager_rx) = mpsc::unbounded_channel();
 
-    // Start log manager.
-    let log_manager = LogManager::new(config.log_path.clone(), log_manager_rx, 1024);
-    tokio::spawn(log_manager.run());
-    info!("Start log manager");
-
     // Start executor.
-    let db = Arc::new(KeyValueDb::new(config.db_path.clone(), storage_tx)?);
-    let executor = Executor::new(config.node_id, executor_rx, log_manager_tx, lock_mananger_tx, db);
+    let db = Arc::new(KeyValueDb::new(storage_tx.clone()));
+    let executor = Executor::new(config.node_id, executor_rx, log_manager_tx, lock_mananger_tx, db.clone());
     tokio::spawn(executor.run());
     info!("Start executor");
 
@@ -45,6 +40,11 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
         tokio::spawn(storage.run());
         info!("Start storage service");
     }
+
+    // Start log manager.
+    let log_manager = LogManager::new(config.log_path.clone(), log_manager_rx, db.clone(), 1024);
+    tokio::spawn(log_manager.run());
+    info!("Start log manager");
 
     // Start lock manager.
     let lock_manager = LockManager::new(lock_manager_rx);
