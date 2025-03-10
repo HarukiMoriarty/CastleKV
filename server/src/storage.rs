@@ -1,10 +1,27 @@
+use common::CommandId;
 use sled::Db;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-use crate::comm::StorageMessage;
 use crate::config::ServerConfig;
+
+pub enum StorageMessage {
+    Put {
+        cmd_id: CommandId,
+        op_id: u32,
+        key: String,
+        value: String,
+    },
+    Delete {
+        cmd_id: CommandId,
+        op_id: u32,
+        key: String,
+    },
+    Flush {
+        reply_tx: oneshot::Sender<()>,
+    },
+}
 
 pub struct Storage {
     // Persistence sled database
