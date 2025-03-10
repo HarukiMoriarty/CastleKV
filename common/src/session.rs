@@ -75,38 +75,12 @@ impl Session {
 
         // Connect to each partition server and rpc streams
         for partition in &partition_info {
-            let server_addr = format!("http://{}", partition.server_address);
-            let mut db = loop {
-                match DbClient::connect(server_addr.clone()).await {
-                    Ok(client) => break client,
-                    Err(e) => {
-                        debug!(
-                            "Failed to connect to server: {}, error: {}. Retrying...",
-                            partition.server_address, e
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    }
-                }
-            };
-
-            let (tx, rx) = mpsc::channel(100);
-
-            let mut request = Request::new(ReceiverStream::new(rx));
-            request
-                .metadata_mut()
-                .insert(metadata::SESSION_NAME, FromStr::from_str(name).unwrap());
-
-            let rx = db
-                .connect_executor(request)
+            connect_to_server(&partition.server_address, name, &mut txs, &mut rxs)
                 .await
                 .context(format!(
-                    "Failed to connect executor for server: {}",
+                    "Failed to connect to server: {}",
                     partition.server_address
-                ))?
-                .into_inner();
-
-            txs.insert(partition.server_address.clone(), tx);
-            rxs.insert(partition.server_address.clone(), rx);
+                ))?;
         }
 
         Ok(Self {
@@ -326,36 +300,70 @@ impl Session {
 
         match &mut self.client {
             Client::Remote { txs, rxs } => {
-                // Phase 1: Send all commands to their respective servers without waiting for results
-                for (server_addr, cmd) in &cmds {
-                    // Get the sender for this server
-                    let tx = txs
-                        .get(server_addr)
-                        .context(format!("No tx for server: {}", server_addr))?;
-
-                    // Send the command without waiting for the result
-                    tx.send(cmd.clone())
-                        .await
-                        .context(format!("Failed to send command to server: {}", server_addr))?;
-                }
-
-                // Phase 2: Collect results from all servers
                 let mut results = Vec::new();
-                for (server_addr, _) in cmds {
-                    let rx = rxs
-                        .get_mut(&server_addr)
-                        .context(format!("No rx for server: {}", server_addr))?;
 
-                    let Some(cmd_result) = rx.next().await else {
-                        bail!("connection to server {} closed", server_addr);
-                    };
+                for (server_addr, cmd) in cmds {
+                    // Keep retrying until successful
+                    loop {
+                        // Send command to server
+                        let tx = txs
+                            .get(&server_addr)
+                            .context(format!("No tx for server: {}", server_addr))?;
 
-                    let cmd_result = cmd_result.context(format!(
-                        "Failed to receive result from server: {}",
-                        server_addr
-                    ))?;
+                        if let Err(send_err) = tx.send(cmd.clone()).await {
+                            debug!(
+                                "Failed to send command to server: {}, error: {}. Reconnecting...",
+                                server_addr, send_err
+                            );
 
-                    results.push(cmd_result);
+                            // Connection broken, try to reconnect
+                            connect_to_server(&server_addr, &self.name, txs, rxs)
+                                .await
+                                .context(format!(
+                                    "Failed to reconnect to server: {}",
+                                    server_addr
+                                ))?;
+                            continue;
+                        }
+
+                        // Receive the result
+                        let rx = rxs
+                            .get_mut(&server_addr)
+                            .context(format!("No rx for server: {}", server_addr))?;
+
+                        match rx.next().await {
+                            Some(Ok(result)) => {
+                                results.push(result);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                debug!(
+                                    "Error receiving result from server: {}, error: {}. Reconnecting...",
+                                    server_addr, e
+                                );
+
+                                connect_to_server(&server_addr, &self.name, txs, rxs)
+                                    .await
+                                    .context(format!(
+                                        "Failed to reconnect to server: {}",
+                                        server_addr
+                                    ))?;
+                            }
+                            None => {
+                                debug!(
+                                    "Connection to server {} closed. Reconnecting...",
+                                    server_addr
+                                );
+
+                                connect_to_server(&server_addr, &self.name, txs, rxs)
+                                    .await
+                                    .context(format!(
+                                        "Failed to reconnect to server: {}",
+                                        server_addr
+                                    ))?;
+                            }
+                        }
+                    }
                 }
 
                 Ok(results)
@@ -385,4 +393,56 @@ impl Session {
             }
         }
     }
+}
+
+/// Establishes a connection to a server and sets up the executor stream.
+/// This function handles retries connection.
+///
+/// # Arguments
+/// * `server_address` - The address of the server to connect to
+/// * `name` - The session name to use in metadata
+/// * `txs` - HashMap to store the sender channel
+/// * `rxs` - HashMap to store the receiver stream
+async fn connect_to_server(
+    server_address: &str,
+    name: &str,
+    txs: &mut HashMap<String, mpsc::Sender<Command>>,
+    rxs: &mut HashMap<String, Streaming<CommandResult>>,
+) -> Result<()> {
+    let server_addr = format!("http://{}", server_address);
+
+    // Retry loop for the connection
+    let mut db = loop {
+        match DbClient::connect(server_addr.clone()).await {
+            Ok(client) => break client,
+            Err(e) => {
+                debug!(
+                    "Failed to connect to server: {}, error: {}. Retrying...",
+                    server_address, e
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+    };
+
+    let (tx, rx) = mpsc::channel(100);
+
+    let mut request = Request::new(ReceiverStream::new(rx));
+    request
+        .metadata_mut()
+        .insert(metadata::SESSION_NAME, FromStr::from_str(name).unwrap());
+
+    let rx = db
+        .connect_executor(request)
+        .await
+        .context(format!(
+            "Failed to connect executor for server: {}",
+            server_address
+        ))?
+        .into_inner();
+
+    txs.insert(server_address.to_string(), tx);
+    rxs.insert(server_address.to_string(), rx);
+
+    Ok(())
 }
