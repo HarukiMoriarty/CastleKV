@@ -235,17 +235,19 @@ impl Executor {
             }
         }
 
-        let log_req = LogManagerMessage::AppendEntry {
-            term,
-            index,
-            cmd_id,
-            ops: log_ops,
-            resp_tx: log_resp_tx,
-        };
+        if !log_ops.is_empty() {
+            let log_req = LogManagerMessage::AppendEntry {
+                term,
+                index,
+                cmd_id,
+                ops: log_ops,
+                resp_tx: log_resp_tx,
+            };
 
-        log_manager_tx.send(log_req).unwrap();
+            log_manager_tx.send(log_req).unwrap();
 
-        // Wait for log response sync to ensure log entry is persisted
-        let _ = log_resp_rx.await;
+            // Wait for log response sync to ensure log entry is persisted
+            let _ = log_resp_rx.await;
+        }
     }
 }
