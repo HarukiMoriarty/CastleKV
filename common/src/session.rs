@@ -6,6 +6,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
+use tracing::debug;
 
 use super::{extract_key_number, form_key, metadata, CommandId};
 use rpc::gateway::db_client::DbClient;
@@ -51,9 +52,18 @@ impl Session {
     /// A new Session connected to all available partition servers
     pub async fn remote(name: &str, manager_addr: String) -> Result<Self> {
         // Connect to the manager service to get partition information
-        let mut manager_client = ManagerServiceClient::connect(manager_addr)
-            .await
-            .context("Failed to connect to manager")?;
+        let mut manager_client = loop {
+            match ManagerServiceClient::connect(manager_addr.clone()).await {
+                Ok(manager_client) => break manager_client,
+                Err(e) => {
+                    debug!(
+                        "Failed to connect to manager: {}, error: {}. Retrying...",
+                        manager_addr, e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            }
+        };
         let response = manager_client
             .get_partition_map(GetPartitionMapRequest {})
             .await
@@ -66,10 +76,18 @@ impl Session {
         // Connect to each partition server and rpc streams
         for partition in &partition_info {
             let server_addr = format!("http://{}", partition.server_address);
-            let mut db = DbClient::connect(server_addr).await.context(format!(
-                "Failed to connect to server: {}",
-                partition.server_address
-            ))?;
+            let mut db = loop {
+                match DbClient::connect(server_addr.clone()).await {
+                    Ok(client) => break client,
+                    Err(e) => {
+                        debug!(
+                            "Failed to connect to server: {}, error: {}. Retrying...",
+                            partition.server_address, e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                }
+            };
 
             let (tx, rx) = mpsc::channel(100);
 
