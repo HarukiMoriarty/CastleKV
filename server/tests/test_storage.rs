@@ -22,7 +22,7 @@ mod tests {
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
             // Initialize the database and storage with path
-            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+            let db = KeyValueDb::new(Some(storage_tx.clone()));
 
             // Create storage config with batch settings
             let storage_config = ServerConfig::builder()
@@ -68,7 +68,7 @@ mod tests {
 
             // Create a new instance of db and storage to verify persistence
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
+            let db2 = KeyValueDb::new(Some(storage_tx2.clone()));
 
             // Verify the data was persisted to disk and loaded into the new instance
             let get_op2 = Operation {
@@ -92,7 +92,7 @@ mod tests {
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
             // Initialize the database with path
-            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+            let db = KeyValueDb::new(Some(storage_tx.clone()));
 
             // Create storage with small batch size for testing
             let storage_config = ServerConfig::builder()
@@ -185,7 +185,7 @@ mod tests {
 
             // Verify persistence after restart
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
+            let db2 = KeyValueDb::new(Some(storage_tx2.clone()));
 
             // Check deleted key is still gone
             let get_op4 = Operation {
@@ -214,7 +214,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             // Initialize database with no path (in-memory only)
-            let db = KeyValueDb::new(None::<&Path>, None).unwrap();
+            let db = KeyValueDb::new(None);
 
             // Test operations work in memory
             let put_op = Operation {
@@ -238,7 +238,7 @@ mod tests {
             drop(db);
 
             // Creating a new instance should start with empty data
-            let db2 = KeyValueDb::new(None::<&Path>, None).unwrap();
+            let db2 = KeyValueDb::new(None);
 
             let get_op2 = Operation {
                 id: 3,
