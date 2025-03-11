@@ -12,74 +12,71 @@ mod tests {
     use server::database::KeyValueDb;
     use server::storage::Storage;
 
-    #[test]
-    fn test_database_with_storage() {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let dir = tempdir().unwrap();
-            let db_path = dir.path().to_path_buf();
+    #[tokio::test]
+    async fn test_database_with_storage() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().to_path_buf();
 
-            let (storage_tx, storage_rx) = mpsc::unbounded_channel();
+        let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
-            // Initialize the database and storage with path
-            let db = KeyValueDb::new(Some(storage_tx.clone()));
+        // Initialize the database and storage with path
+        let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
 
-            // Create storage config with batch settings
-            let storage_config = ServerConfig::builder()
-                .db_path(Some(db_path.clone()))
-                .persistence_enabled(true)
-                .batch_size(Some(10)) // Small batch size for testing
-                .batch_timeout_ms(Some(500))
-                .build();
+        // Create storage config with batch settings
+        let storage_config = ServerConfig::builder()
+            .db_path(Some(db_path.clone()))
+            .persistence_enabled(true)
+            .batch_size(Some(10)) // Small batch size for testing
+            .batch_timeout_ms(Some(500))
+            .build();
 
-            let storage = Storage::new(&storage_config, storage_rx).unwrap();
+        let storage = Storage::new(&storage_config, storage_rx).unwrap();
 
-            // Start the storage service in the background
-            let storage_handle = tokio::spawn(storage.run());
+        // Start the storage service in the background
+        let storage_handle = tokio::spawn(storage.run());
 
-            // Test PUT operation
-            let put_op = Operation {
-                id: 1,
-                name: "PUT".to_string(),
-                args: vec!["test_key".to_string(), "test_value".to_string()],
-            };
+        // Test PUT operation
+        let put_op = Operation {
+            id: 1,
+            name: "PUT".to_string(),
+            args: vec!["test_key".to_string(), "test_value".to_string()],
+        };
 
-            let result = db.execute(&put_op, 1.into());
-            assert_eq!(result, "PUT test_key not_found");
+        let result = db.execute(&put_op, 1.into());
+        assert_eq!(result, "PUT test_key not_found");
 
-            // Flush and wait to ensure data is persisted
-            db.sync().await.unwrap();
+        // Flush and wait to ensure data is persisted
+        db.sync().await.unwrap();
 
-            // Test GET operation
-            let get_op = Operation {
-                id: 2,
-                name: "GET".to_string(),
-                args: vec!["test_key".to_string()],
-            };
+        // Test GET operation
+        let get_op = Operation {
+            id: 2,
+            name: "GET".to_string(),
+            args: vec!["test_key".to_string()],
+        };
 
-            let result = db.execute(&get_op, 2.into());
-            assert_eq!(result, "GET test_key test_value");
+        let result = db.execute(&get_op, 2.into());
+        assert_eq!(result, "GET test_key test_value");
 
-            // Drop the database instance which will drop the sender
-            drop(db);
+        // Drop the database instance and the sender
+        drop(db);
 
-            // Wait for storage to shut down
-            storage_handle.await.unwrap();
+        // Wait for storage to shut down
+        storage_handle.await.unwrap();
 
-            // Create a new instance of db and storage to verify persistence
-            let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(Some(storage_tx2.clone()));
+        // Create a new instance of db and storage to verify persistence
+        let (storage_tx2, _) = mpsc::unbounded_channel();
+        let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
 
-            // Verify the data was persisted to disk and loaded into the new instance
-            let get_op2 = Operation {
-                id: 3,
-                name: "GET".to_string(),
-                args: vec!["test_key".to_string()],
-            };
+        // Verify the data was persisted to disk and loaded into the new instance
+        let get_op2 = Operation {
+            id: 3,
+            name: "GET".to_string(),
+            args: vec!["test_key".to_string()],
+        };
 
-            let result = db2.execute(&get_op2, 3.into());
-            assert_eq!(result, "GET test_key test_value");
-        });
+        let result = db2.execute(&get_op2, 3.into());
+        assert_eq!(result, "GET test_key test_value");
     }
 
     #[test]
@@ -92,7 +89,7 @@ mod tests {
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
             // Initialize the database with path
-            let db = KeyValueDb::new(Some(storage_tx.clone()));
+            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
 
             // Create storage with small batch size for testing
             let storage_config = ServerConfig::builder()
@@ -185,7 +182,7 @@ mod tests {
 
             // Verify persistence after restart
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(Some(storage_tx2.clone()));
+            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
 
             // Check deleted key is still gone
             let get_op4 = Operation {
@@ -214,7 +211,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             // Initialize database with no path (in-memory only)
-            let db = KeyValueDb::new(None);
+            let db = KeyValueDb::new(None::<&Path>, None).unwrap();
 
             // Test operations work in memory
             let put_op = Operation {
@@ -238,7 +235,7 @@ mod tests {
             drop(db);
 
             // Creating a new instance should start with empty data
-            let db2 = KeyValueDb::new(None);
+            let db2 = KeyValueDb::new(None::<&Path>, None).unwrap();
 
             let get_op2 = Operation {
                 id: 3,

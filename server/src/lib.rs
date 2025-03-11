@@ -11,9 +11,9 @@ use database::KeyValueDb;
 use executor::Executor;
 use gateway::GatewayService;
 use lock_manager::LockManager;
-use storage::Storage;
 use log_manager::LogManager;
 use std::sync::Arc;
+use storage::Storage;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -29,8 +29,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     let (log_manager_tx, log_manager_rx) = mpsc::unbounded_channel();
 
     // Start executor.
-    let db = Arc::new(KeyValueDb::new(storage_tx.clone()));
-    let executor = Executor::new(config.node_id, executor_rx, log_manager_tx, lock_mananger_tx, db.clone());
+    let db = Arc::new(KeyValueDb::new(config.db_path.clone(), storage_tx.clone())?);
+    let executor = Executor::new(
+        config.node_id,
+        executor_rx,
+        log_manager_tx,
+        lock_mananger_tx,
+        db.clone(),
+    );
     tokio::spawn(executor.run());
     info!("Start executor");
 

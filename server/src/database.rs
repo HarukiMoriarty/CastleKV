@@ -1,6 +1,7 @@
 use common::CommandId;
 use rpc::gateway::Operation;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 
@@ -13,14 +14,30 @@ pub struct KeyValueDb {
 
 impl KeyValueDb {
     pub fn new(
+        db_path: Option<impl AsRef<Path>>,
         storage_tx: Option<mpsc::UnboundedSender<StorageMessage>>,
-    ) -> Self {
+    ) -> Result<Self, sled::Error> {
         let memory_db = Arc::new(RwLock::new(BTreeMap::new()));
 
-        Self {
+        // Load existing data from persistent storage into memory
+        if let Some(path) = db_path {
+            let persistent_db = sled::open(path)?;
+
+            // Load existing data from persistent storage into memory
+            {
+                let mut memory_cache = memory_db.write().unwrap();
+                for (key, value) in persistent_db.iter().flatten() {
+                    let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
+                    let value_str = String::from_utf8(value.to_vec()).unwrap_or_default();
+                    memory_cache.insert(key_str, value_str);
+                }
+            }
+        }
+
+        Ok(Self {
             memory_db,
             storage_tx,
-        }
+        })
     }
 
     pub fn execute(&self, op: &Operation, cmd_id: CommandId) -> String {
