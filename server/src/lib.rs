@@ -29,7 +29,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     let (log_manager_tx, log_manager_rx) = mpsc::unbounded_channel();
 
     // Start executor.
-    let db = Arc::new(KeyValueDb::new(config.db_path.clone(), storage_tx.clone())?);
+    let db = Arc::new(KeyValueDb::new(config.db_path.clone(), storage_tx)?);
     let executor = Executor::new(
         config.node_id,
         executor_rx,
