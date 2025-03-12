@@ -1,4 +1,3 @@
-use common::CommandId;
 use sled::Db;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -8,18 +7,16 @@ use crate::config::ServerConfig;
 
 pub enum StorageMessage {
     Put {
-        cmd_id: CommandId,
-        op_id: u32,
+        log_entry_index: Option<u64>,
         key: String,
         value: String,
     },
     Delete {
-        cmd_id: CommandId,
-        op_id: u32,
+        log_entry_index: Option<u64>,
         key: String,
     },
     Flush {
-        reply_tx: oneshot::Sender<()>,
+        reply_tx: oneshot::Sender<Option<u64>>,
     },
 }
 
@@ -56,13 +53,12 @@ impl Storage {
         while let Some(msg) = self.storage_rx.recv().await {
             match msg {
                 StorageMessage::Put {
+                    log_entry_index,
                     key,
                     value,
-                    cmd_id,
-                    op_id,
                 } => {
                     // Add to batch
-                    batch.push((key.clone(), Some(value.clone())));
+                    batch.push((log_entry_index, key, Some(value)));
 
                     // Flush if batch is large enough
                     if batch.len() >= self.max_batch_size {
@@ -70,9 +66,12 @@ impl Storage {
                         last_flush = Instant::now();
                     }
                 }
-                StorageMessage::Delete { key, cmd_id, op_id } => {
+                StorageMessage::Delete {
+                    log_entry_index,
+                    key,
+                } => {
                     // Add to batch
-                    batch.push((key.clone(), None));
+                    batch.push((log_entry_index, key, None));
 
                     // Flush if batch is large enough
                     if batch.len() >= self.max_batch_size {
@@ -81,6 +80,10 @@ impl Storage {
                     }
                 }
                 StorageMessage::Flush { reply_tx } => {
+                    let log_checkpoint_index = match batch.first() {
+                        Some(log_entry_index) => log_entry_index.0,
+                        None => None,
+                    };
                     // Flush any pending operations
                     if !batch.is_empty() {
                         self.flush_batch(&mut batch).await;
@@ -93,7 +96,8 @@ impl Storage {
                     debug!("Database flushed");
 
                     // Send acknowledgement
-                    if reply_tx.send(()).is_err() {
+                    // TODO: should check highest continuous command id, checkpoint
+                    if reply_tx.send(log_checkpoint_index).is_err() {
                         warn!("Failed to send flush acknowledgement");
                     }
 
@@ -111,17 +115,17 @@ impl Storage {
         info!("Storage service stopped");
     }
 
-    async fn flush_batch(&self, batch: &mut Vec<(String, Option<String>)>) {
-        for (key, value_opt) in batch.drain(..) {
+    async fn flush_batch(&self, batch: &mut Vec<(Option<u64>, String, Option<String>)>) {
+        for (_, key, value_opt) in batch.drain(..) {
             match value_opt {
                 Some(value) => {
                     if let Err(e) = self.db.insert(key.as_bytes(), value.as_bytes()) {
-                        error!("Failed to persist PUT: {}", e);
+                        error!("Failed to persist PUT for key {}: {}", key, e);
                     }
                 }
                 None => {
                     if let Err(e) = self.db.remove(key.as_bytes()) {
-                        error!("Failed to persist DELETE: {}", e);
+                        error!("Failed to persist DELETE for key {}: {}", key, e);
                     }
                 }
             }

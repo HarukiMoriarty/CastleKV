@@ -1,5 +1,8 @@
 use common::NodeId;
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// Server configuration parameters
 #[derive(Debug, Clone)]
@@ -27,6 +30,12 @@ pub struct ServerConfig {
 
     /// Timeout in milliseconds before a batch is flushed even if not full
     pub batch_timeout_ms: Option<u64>,
+
+    /// Table name
+    pub table_name: HashSet<String>,
+
+    /// Partition infomation
+    pub partition_info: HashMap<String, (u64, u64)>,
 }
 
 impl Default for ServerConfig {
@@ -40,6 +49,8 @@ impl Default for ServerConfig {
             persistence_enabled: false,
             batch_size: None,
             batch_timeout_ms: None,
+            table_name: HashSet::new(),
+            partition_info: HashMap::new(),
         }
     }
 }

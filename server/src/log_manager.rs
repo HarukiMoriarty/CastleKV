@@ -1,7 +1,6 @@
 use bincode;
 use common::CommandId;
 use glob;
-use rpc::gateway::Operation;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -12,21 +11,22 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
 use crate::database::KeyValueDb;
+use crate::plan::Plan;
 
 pub type LogManagerSender = UnboundedSender<LogManagerMessage>;
 type LogManagerReceiver = UnboundedReceiver<LogManagerMessage>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct LogCommand {
+pub(crate) struct LogCommand {
     cmd_id: CommandId,
-    ops: Vec<(String, String)>,
+    pub(crate) ops: Vec<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct LogEntry {
+pub(crate) struct LogEntry {
     term: u64,
-    index: u64,
-    command: LogCommand,
+    pub(crate) index: u64,
+    pub(crate) command: LogCommand,
 }
 
 /// A single log segment
@@ -88,55 +88,72 @@ impl RaftLog {
     pub fn open(base_path: &str, max_segment_size: usize) -> io::Result<Self> {
         // Create directory if it doesn't exist
         std::fs::create_dir_all(base_path)?;
-        
+
         // Check for existing segments
         let log_pattern = format!("{}/raft_log_segment_*.log", base_path);
         let mut existing_segments: Vec<_> = glob::glob(&log_pattern)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .filter_map(Result::ok)
             .collect();
-            
+
         // Sort segments by their number to ensure correct order
         existing_segments.sort_by(|a, b| {
-            let a_num = a.to_string_lossy()
-                .split("segment_").nth(1).unwrap_or("0")
-                .split('.').next().unwrap_or("0")
-                .parse::<u64>().unwrap_or(0);
-            let b_num = b.to_string_lossy()
-                .split("segment_").nth(1).unwrap_or("0")
-                .split('.').next().unwrap_or("0")
-                .parse::<u64>().unwrap_or(0);
+            let a_num = a
+                .to_string_lossy()
+                .split("segment_")
+                .nth(1)
+                .unwrap_or("0")
+                .split('.')
+                .next()
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0);
+            let b_num = b
+                .to_string_lossy()
+                .split("segment_")
+                .nth(1)
+                .unwrap_or("0")
+                .split('.')
+                .next()
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0);
             a_num.cmp(&b_num)
         });
-        
+
         let mut segments = Vec::new();
         let mut last_index = 0;
-        
+
         // Load existing segments
         for segment_path in &existing_segments {
             let path_str = segment_path.to_string_lossy();
             // Extract segment number to determine start index
             let segment_num = path_str
-                .split("segment_").nth(1).unwrap_or("0")
-                .split('.').next().unwrap_or("0")
-                .parse::<u64>().unwrap_or(0);
-                
+                .split("segment_")
+                .nth(1)
+                .unwrap_or("0")
+                .split('.')
+                .next()
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0);
+
             // For the first segment, start index is 1
             // For others, we'll determine it from the previous segment's entries
             let start_index = if segment_num == 0 { 1 } else { last_index + 1 };
-            
+
             let mut segment = Segment::new(&path_str, start_index)?;
-            
+
             // Load entries to determine the last index for the next segment
             if let Ok(entries) = segment.load_entries() {
                 if let Some(last_entry) = entries.last() {
                     last_index = last_entry.index;
                 }
             }
-            
+
             segments.push(segment);
         }
-        
+
         // Create or use the last segment as current
         let current_segment = if segments.is_empty() {
             // No segments found, create a new one
@@ -146,7 +163,7 @@ impl RaftLog {
             // Use the last segment as current
             segments.pop().unwrap()
         };
-        
+
         Ok(RaftLog {
             segments,
             current_segment,
@@ -191,11 +208,9 @@ impl RaftLog {
 
 pub enum LogManagerMessage {
     AppendEntry {
-        term: u64,
-        index: u64,
         cmd_id: CommandId,
         ops: Vec<(String, String)>,
-        resp_tx: oneshot::Sender<()>,
+        resp_tx: oneshot::Sender<u64>,
     },
 }
 
@@ -222,7 +237,7 @@ impl LogManager {
             Ok(log) => {
                 info!("Successfully opened log at {}", path_str);
                 log
-            },
+            }
             Err(e) => {
                 error!("Failed to open log: {}, retrying...", e);
                 RaftLog::open(path_str, max_segment_size).unwrap()
@@ -235,25 +250,8 @@ impl LogManager {
         for entry in entries {
             debug!("Log entry: {:?}", entry);
 
-            for op in entry.command.ops {
-                let key = op.0;
-                let value = op.1;
-                let cmd_id = entry.command.cmd_id;
-
-                if value == "NULL" {
-                    db.execute(&Operation { 
-                        id: 0, 
-                        name: "DELETE".to_string(), 
-                        args: vec![key] 
-                    }, cmd_id);
-                } else {
-                    db.execute(&Operation { 
-                        id: 0, 
-                        name: "PUT".to_string(), 
-                        args: vec![key, value] 
-                    }, cmd_id);
-                }
-            }
+            let plan = Plan::from_log_entry(entry).unwrap();
+            db.execute(&plan);
         }
 
         LogManager { log, rx, db }
@@ -265,12 +263,14 @@ impl LogManager {
         while let Some(msg) = rx.recv().await {
             match msg {
                 LogManagerMessage::AppendEntry {
-                    term,
-                    index,
                     ops,
                     cmd_id,
                     resp_tx,
                 } => {
+                    // TODO: use raft to determine term and log index
+                    let term = 0;
+                    let index = 0;
+
                     let entry = LogEntry {
                         term,
                         index,
@@ -307,7 +307,7 @@ impl LogManager {
                             }
                         }
                     }
-                    let _ = resp_tx.send(());
+                    resp_tx.send(index).unwrap();
                 }
             }
         }

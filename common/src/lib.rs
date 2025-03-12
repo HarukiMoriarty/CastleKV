@@ -12,14 +12,39 @@ pub fn init_tracing() {
         .init();
 }
 
-pub fn extract_key_number(key: &str) -> u64 {
-    key.strip_prefix("usertable_user")
-        .and_then(|num_str| num_str.parse().ok())
-        .expect("expected key with prefix 'usertable_user'")
+pub fn extract_key(key: &str) -> Result<(String, u64), String> {
+    // Check if key contains at least one digit
+    if !key.chars().any(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "Invalid key format: '{}'. No numeric portion found",
+            key
+        ));
+    }
+
+    // Find where the numeric part starts
+    let (table_part, num_part) =
+        key.split_at(key.chars().position(|c| c.is_ascii_digit()).unwrap());
+
+    // Check that the table part is not empty
+    if table_part.is_empty() {
+        return Err(format!(
+            "Invalid key format: '{}'. Missing table name prefix",
+            key
+        ));
+    }
+
+    // Parse the number portion
+    match num_part.parse::<u64>() {
+        Ok(num) => Ok((table_part.to_string(), num)),
+        Err(_) => Err(format!(
+            "Invalid key number: '{}'. Expected numeric value",
+            num_part
+        )),
+    }
 }
 
-pub fn form_key(num: u64) -> String {
-    format!("usertable_user{}", num)
+pub fn form_key(table_name: &String, num: u64) -> String {
+    format!("{}{}", table_name, num)
 }
 
 pub fn set_default_rust_log(val: &str) {

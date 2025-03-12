@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Instant;
 
-use common::{extract_key_number, form_key, init_tracing, set_default_rust_log, Session};
+use common::{extract_key, form_key, init_tracing, set_default_rust_log, Session};
 use rpc::gateway::{CommandResult, OperationResult, Status};
 
 #[derive(Parser)]
@@ -182,27 +182,28 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
             if tokens.len() != 3 {
                 return error("invalid operation");
             }
-            if !tokens[2].starts_with("usertable_user") {
-                tokens[2] = format!("usertable_user{}", tokens[2]);
-            }
         }
         "SWAP" | "PUT" => {
             if tokens.len() != 4 {
                 return error("invalid operation");
-            }
-            if !tokens[2].starts_with("usertable_user") {
-                tokens[2] = format!("usertable_user{}", tokens[2]);
             }
         }
         "SCAN" => {
             if tokens.len() != 4 {
                 return error("invalid operation");
             }
-            if !tokens[2].starts_with("usertable_user") {
-                tokens[2] = format!("usertable_user{}", tokens[2]);
-            }
-            if !tokens[3].starts_with("usertable_user") {
-                tokens[3] = format!("usertable_user{}", tokens[3]);
+
+            // Check if both keys are for the same table
+            let res1 = extract_key(&tokens[2]).map_err(|e| anyhow::anyhow!(e));
+            let res2 = extract_key(&tokens[3]).map_err(|e| anyhow::anyhow!(e));
+
+            if let (Ok((table1, _)), Ok((table2, _))) = (res1, res2) {
+                if table1 != table2 {
+                    return error(format!(
+                        "SCAN keys must be from same table, got {} and {}",
+                        table1, table2
+                    ));
+                }
             }
         }
         _ => unreachable!(),
@@ -267,6 +268,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                 // Find min start key and max end key across all partitions
                 let mut min_start_key = None;
                 let mut max_end_key = None;
+                let mut table_name = None;
                 let mut scan_data = Vec::new();
                 let scan_has_err = results.iter().any(|o| o.has_err);
 
@@ -276,8 +278,13 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                         if first_line.trim().starts_with("SCAN ") {
                             let parts: Vec<&str> = first_line.split_whitespace().collect();
                             if parts.len() >= 3 {
-                                let start_key = extract_key_number(parts[1]);
-                                let end_key = extract_key_number(parts[2]);
+                                let (table_name_start, start_key) = extract_key(parts[1]).unwrap();
+                                let (table_name_end, end_key) = extract_key(parts[2]).unwrap();
+                                assert_eq!(table_name_start, table_name_end);
+                                if table_name.is_none() {
+                                    table_name = Some(table_name_start.clone())
+                                }
+                                assert_eq!(table_name, Some(table_name_start));
 
                                 // Update min start key
                                 if min_start_key.is_none() || start_key < min_start_key.unwrap() {
@@ -303,14 +310,18 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
 
                 // Format scan results
                 let mut scan_output = Vec::new();
+                let table = table_name.unwrap();
+
                 scan_output.push(format!(
                     "SCAN {} {} BEGIN",
-                    form_key(min_start_key.unwrap()),
-                    form_key(max_end_key.unwrap())
+                    form_key(&table, min_start_key.unwrap()),
+                    form_key(&table, max_end_key.unwrap())
                 ));
+
+                // Sort scan data by key value
                 scan_data.sort_by(|a, b| {
-                    let a_num: u64 = extract_key_number(a.split_whitespace().next().unwrap());
-                    let b_num: u64 = extract_key_number(b.split_whitespace().next().unwrap());
+                    let a_num: u64 = extract_key(a.split_whitespace().next().unwrap()).unwrap().1;
+                    let b_num: u64 = extract_key(b.split_whitespace().next().unwrap()).unwrap().1;
                     a_num.cmp(&b_num)
                 });
                 for data_line in scan_data {

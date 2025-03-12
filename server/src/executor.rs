@@ -1,5 +1,4 @@
-use rpc::gateway::{Command, CommandResult, Operation, OperationResult, Status};
-use std::collections::HashSet;
+use rpc::gateway::{Command, CommandResult, OperationResult, Status};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -7,10 +6,12 @@ use tokio_stream::StreamExt;
 use tonic::Streaming;
 use tracing::{debug, warn};
 
+use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
 use crate::log_manager::{LogManagerMessage, LogManagerSender};
-use common::{extract_key_number, form_key, CommandId, NodeId};
+use crate::plan::Plan;
+use common::CommandId;
 
 pub type ExecutorSender = mpsc::UnboundedSender<ExecutorMessage>;
 type ExecutorReceiver = mpsc::UnboundedReceiver<ExecutorMessage>;
@@ -23,7 +24,7 @@ pub enum ExecutorMessage {
 }
 
 pub struct Executor {
-    node_id: NodeId,
+    config: ServerConfig,
     rx: ExecutorReceiver,
     log_manager_tx: LogManagerSender,
     lock_manager_tx: LockManagerSender,
@@ -33,14 +34,14 @@ pub struct Executor {
 
 impl Executor {
     pub fn new(
-        node_id: NodeId,
+        config: ServerConfig,
         rx: ExecutorReceiver,
         log_manager_tx: LogManagerSender,
         lock_manager_tx: LockManagerSender,
         db: Arc<KeyValueDb>,
     ) -> Self {
         Self {
-            node_id,
+            config,
             rx,
             log_manager_tx,
             lock_manager_tx,
@@ -60,6 +61,9 @@ impl Executor {
                     let cmd_cnt = Arc::clone(&self.cmd_cnt);
                     let db = Arc::clone(&self.db);
 
+                    // Seperate clone to avoid wrong ownership
+                    let partition_info = self.config.partition_info.clone();
+
                     tokio::spawn(async move {
                         let mut stream = stream;
                         while let Some(command) = stream.next().await {
@@ -67,20 +71,51 @@ impl Executor {
                                 Ok(cmd) => {
                                     debug!("Command details: {:?}", cmd);
 
-                                    let (read_set, write_set) = Self::calculate_rw_set(&cmd.ops);
+                                    // Generate unique monotonical increasing command id
+                                    let cmd_id = CommandId::new(
+                                        self.config.node_id,
+                                        cmd_cnt.fetch_add(1, Ordering::SeqCst),
+                                    );
+
+                                    // Generate Plan (validation)
+                                    let mut plan =
+                                        match Plan::from_command(&cmd, cmd_id, &partition_info) {
+                                            Err(err) => {
+                                                debug!("Command validation failed: {}", err);
+
+                                                let result = CommandResult {
+                                                    cmd_id: cmd_id.into(),
+                                                    ops: vec![OperationResult {
+                                                        id: 0,
+                                                        content: err.clone(),
+                                                        has_err: true,
+                                                    }],
+                                                    status: Status::Aborted as i32,
+                                                    content: format!(
+                                                        "Command validation failed: {}",
+                                                        err
+                                                    ),
+                                                    has_err: true,
+                                                };
+
+                                                if result_tx.send(Ok(result)).await.is_err() {
+                                                    warn!("Client disconnected");
+                                                    break;
+                                                }
+                                                continue;
+                                            }
+                                            Ok(plan) => plan,
+                                        };
+
                                     let mut lock_requests = Vec::new();
-                                    for key in read_set {
-                                        lock_requests.push((key, LockMode::Shared));
+                                    for key in &plan.rw_set.read_set {
+                                        lock_requests.push((key.clone(), LockMode::Shared));
                                     }
-                                    for key in write_set {
-                                        lock_requests.push((key, LockMode::Exclusive));
+                                    for key in &plan.rw_set.write_set {
+                                        lock_requests.push((key.clone(), LockMode::Exclusive));
                                     }
 
                                     let (lock_resp_tx, lock_resp_rx) = oneshot::channel();
-                                    let cmd_id = CommandId::new(
-                                        self.node_id,
-                                        cmd_cnt.fetch_add(1, Ordering::SeqCst),
-                                    );
 
                                     // Request locks
                                     if lock_manager_tx
@@ -99,28 +134,10 @@ impl Executor {
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
                                             // Append log entry
-                                            Self::append_raft_log(
-                                                cmd.clone(),
-                                                cmd_id,
-                                                &log_manager_tx,
-                                            )
-                                            .await;
-
-                                            // TODO: raft consensus done in log manager
+                                            Self::append_raft_log(&mut plan, &log_manager_tx).await;
 
                                             // Locks acquired successfully
-                                            let mut ops_results = Vec::new();
-
-                                            for op in cmd.ops.iter() {
-                                                // Execute operation on the database
-                                                let op_result = db.execute(op, cmd_id);
-
-                                                ops_results.push(OperationResult {
-                                                    id: op.id,
-                                                    content: op_result,
-                                                    has_err: false,
-                                                });
-                                            }
+                                            let ops_results = db.execute(&plan);
 
                                             // Release locks after operation
                                             let _ = lock_manager_tx
@@ -175,53 +192,11 @@ impl Executor {
         }
     }
 
-    fn calculate_rw_set(ops: &[Operation]) -> (HashSet<String>, HashSet<String>) {
-        let mut read_set = HashSet::new();
-        let mut write_set = HashSet::new();
-
-        for op in ops {
-            match op.name.to_uppercase().as_str() {
-                "PUT" | "SWAP" | "DELETE" => {
-                    if op.args.len() >= 2 {
-                        if read_set.contains(&op.args[0]) {
-                            read_set.remove(&op.args[0]);
-                        }
-                        write_set.insert(op.args[0].clone());
-                    }
-                }
-                "GET" => {
-                    if op.args.len() >= 2 && !write_set.contains(&op.args[0]) {
-                        read_set.insert(op.args[0].clone());
-                    }
-                }
-                "SCAN" => {
-                    if op.args.len() >= 2 {
-                        let (start_num, end_num) = (
-                            extract_key_number(&op.args[0]),
-                            extract_key_number(&op.args[1]),
-                        );
-                        for num in start_num..=end_num {
-                            if !write_set.contains(&form_key(num)) {
-                                read_set.insert(form_key(num));
-                            }
-                        }
-                    }
-                }
-                _ => panic!("Unsupported operation: {}", op.name),
-            }
-        }
-
-        (read_set, write_set)
-    }
-
-    async fn append_raft_log(cmd: Command, cmd_id: CommandId, log_manager_tx: &LogManagerSender) {
-        // TODO: get <Term, Index> from raft state
-        let term = 0;
-        let index = 0;
+    async fn append_raft_log(plan: &mut Plan, log_manager_tx: &LogManagerSender) {
         let mut log_ops: Vec<(String, String)> = Vec::new();
-        let (log_resp_tx, log_resp_rx) = oneshot::channel();
+        let (log_resp_tx, log_resp_rx) = oneshot::channel::<u64>();
 
-        for op in cmd.ops.iter() {
+        for op in plan.ops.iter() {
             let op_name = op.name.clone();
             let op_args = op.args.clone();
 
@@ -233,13 +208,12 @@ impl Executor {
                 let key = op_args[0].clone();
                 log_ops.push((key, "NULL".to_string()));
             }
+            // Other operations like GET or SCAN don't need to be logged
         }
 
         if !log_ops.is_empty() {
             let log_req = LogManagerMessage::AppendEntry {
-                term,
-                index,
-                cmd_id,
+                cmd_id: plan.cmd_id,
                 ops: log_ops,
                 resp_tx: log_resp_tx,
             };
@@ -247,7 +221,7 @@ impl Executor {
             log_manager_tx.send(log_req).unwrap();
 
             // Wait for log response sync to ensure log entry is persisted
-            let _ = log_resp_rx.await;
+            plan.log_entry_index = Some(log_resp_rx.await.unwrap());
         }
     }
 }

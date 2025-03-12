@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::io::{self, BufRead};
 use tracing::error;
 
-use common::{extract_key_number, form_key, init_tracing, set_default_rust_log, Session};
+use common::{extract_key, form_key, init_tracing, set_default_rust_log, Session};
 use rpc::gateway::{CommandResult, Status};
 
 #[derive(Parser)]
@@ -158,8 +158,9 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
                     if !lines.is_empty() && lines[0].trim().starts_with("SCAN ") {
                         let parts: Vec<&str> = lines[0].split_whitespace().collect();
                         if parts.len() >= 3 {
-                            let start_key = extract_key_number(parts[1]);
-                            let end_key = extract_key_number(parts[2]);
+                            let (start_name, start_key) = extract_key(parts[1]).unwrap();
+                            let (end_name, end_key) = extract_key(parts[2]).unwrap();
+                            assert_eq!(start_name, end_name);
 
                             // Update min start key
                             if min_start_key.is_none() || start_key < min_start_key.unwrap() {
@@ -186,12 +187,12 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
                 let mut scan_result = Vec::new();
                 scan_result.push(format!(
                     "SCAN {} {} BEGIN",
-                    form_key(min_start_key.unwrap()),
-                    form_key(max_end_key.unwrap())
+                    form_key(&"usertable_user".to_string(), min_start_key.unwrap()),
+                    form_key(&"usertable_user".to_string(), max_end_key.unwrap())
                 ));
                 scan_entries.sort_by(|a, b| {
-                    let a_num: u64 = extract_key_number(a.split_whitespace().next().unwrap());
-                    let b_num: u64 = extract_key_number(b.split_whitespace().next().unwrap());
+                    let a_num: u64 = extract_key(a.split_whitespace().next().unwrap()).unwrap().1;
+                    let b_num: u64 = extract_key(b.split_whitespace().next().unwrap()).unwrap().1;
                     a_num.cmp(&b_num)
                 });
                 for entry in scan_entries {

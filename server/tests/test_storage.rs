@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use rpc::gateway::Operation;
+    use std::collections::HashSet;
     use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -17,10 +18,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().to_path_buf();
 
+        let mut table_name = HashSet::new();
+        table_name.insert("usertable_user".to_string());
+
         let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
         // Initialize the database and storage with path
-        let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+        let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx), &table_name).unwrap();
 
         // Create storage config with batch settings
         let storage_config = ServerConfig::builder()
@@ -39,11 +43,11 @@ mod tests {
         let put_op = Operation {
             id: 1,
             name: "PUT".to_string(),
-            args: vec!["test_key".to_string(), "test_value".to_string()],
+            args: vec!["usertable_user1".to_string(), "test_value".to_string()],
         };
 
-        let result = db.execute(&put_op, 1.into());
-        assert_eq!(result, "PUT test_key not_found");
+        let result = db.execute_operation(&put_op, 1.into());
+        assert_eq!(result, "PUT usertable_user1 not_found");
 
         // Flush and wait to ensure data is persisted
         db.sync().await.unwrap();
@@ -52,11 +56,11 @@ mod tests {
         let get_op = Operation {
             id: 2,
             name: "GET".to_string(),
-            args: vec!["test_key".to_string()],
+            args: vec!["usertable_user1".to_string()],
         };
 
-        let result = db.execute(&get_op, 2.into());
-        assert_eq!(result, "GET test_key test_value");
+        let result = db.execute_operation(&get_op, 2.into());
+        assert_eq!(result, "GET usertable_user1 test_value");
 
         // Drop the database instance and the sender
         drop(db);
@@ -66,17 +70,17 @@ mod tests {
 
         // Create a new instance of db and storage to verify persistence
         let (storage_tx2, _) = mpsc::unbounded_channel();
-        let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
+        let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2), &table_name).unwrap();
 
         // Verify the data was persisted to disk and loaded into the new instance
         let get_op2 = Operation {
             id: 3,
             name: "GET".to_string(),
-            args: vec!["test_key".to_string()],
+            args: vec!["usertable_user1".to_string()],
         };
 
-        let result = db2.execute(&get_op2, 3.into());
-        assert_eq!(result, "GET test_key test_value");
+        let result = db2.execute_operation(&get_op2, 3.into());
+        assert_eq!(result, "GET usertable_user1 test_value");
     }
 
     #[test]
@@ -86,10 +90,13 @@ mod tests {
             let dir = tempdir().unwrap();
             let db_path = dir.path().to_path_buf();
 
+            let mut table_name = HashSet::new();
+            table_name.insert("usertable_user".to_string());
+
             let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
             // Initialize the database with path
-            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx)).unwrap();
+            let db = KeyValueDb::new(Some(db_path.clone()), Some(storage_tx), &table_name).unwrap();
 
             // Create storage with small batch size for testing
             let storage_config = ServerConfig::builder()
@@ -109,10 +116,10 @@ mod tests {
                 let put_op = Operation {
                     id: i,
                     name: "PUT".to_string(),
-                    args: vec![format!("key{}", i), format!("value{}", i)],
+                    args: vec![format!("usertable_user{}", i), format!("value{}", i)],
                 };
 
-                db.execute(&put_op, (i as u64).into());
+                db.execute_operation(&put_op, (i as u64).into());
             }
 
             // Let the batching process some items (shouldn't need explicit flush)
@@ -122,11 +129,11 @@ mod tests {
             let get_op = Operation {
                 id: 1001,
                 name: "GET".to_string(),
-                args: vec!["key0".to_string()],
+                args: vec!["usertable_user0".to_string()],
             };
 
-            let result = db.execute(&get_op, 1001.into());
-            assert_eq!(result, "GET key0 value0");
+            let result = db.execute_operation(&get_op, 1001.into());
+            assert_eq!(result, "GET usertable_user0 value0");
 
             // Force flush for the rest
             db.sync().await.unwrap();
@@ -135,44 +142,44 @@ mod tests {
             let get_op2 = Operation {
                 id: 1002,
                 name: "GET".to_string(),
-                args: vec!["key9".to_string()],
+                args: vec!["usertable_user9".to_string()],
             };
 
-            let result = db.execute(&get_op2, 1002.into());
-            assert_eq!(result, "GET key9 value9");
+            let result = db.execute_operation(&get_op2, 1002.into());
+            assert_eq!(result, "GET usertable_user9 value9");
 
             // Test SCAN operation
             let scan_op = Operation {
                 id: 1003,
                 name: "SCAN".to_string(),
-                args: vec!["key3".to_string(), "key6".to_string()],
+                args: vec!["usertable_user3".to_string(), "usertable_user6".to_string()],
             };
 
-            let result = db.execute(&scan_op, 1003.into());
-            assert!(result.contains("key3 value3"));
-            assert!(result.contains("key4 value4"));
-            assert!(result.contains("key5 value5"));
-            assert!(result.contains("key6 value6"));
+            let result = db.execute_operation(&scan_op, 1003.into());
+            assert!(result.contains("usertable_user3 value3"));
+            assert!(result.contains("usertable_user4 value4"));
+            assert!(result.contains("usertable_user5 value5"));
+            assert!(result.contains("usertable_user6 value6"));
 
             // Test DELETE operation
             let delete_op = Operation {
                 id: 1004,
                 name: "DELETE".to_string(),
-                args: vec!["key5".to_string()],
+                args: vec!["usertable_user5".to_string()],
             };
 
-            db.execute(&delete_op, 1004.into());
+            db.execute_operation(&delete_op, 1004.into());
             db.sync().await.unwrap();
 
             // Verify deletion
             let get_op3 = Operation {
                 id: 1005,
                 name: "GET".to_string(),
-                args: vec!["key5".to_string()],
+                args: vec!["usertable_user5".to_string()],
             };
 
-            let result = db.execute(&get_op3, 1005.into());
-            assert_eq!(result, "GET key5 null");
+            let result = db.execute_operation(&get_op3, 1005.into());
+            assert_eq!(result, "GET usertable_user5 null");
 
             // Drop the database instance which will drop the sender
             drop(db);
@@ -182,70 +189,73 @@ mod tests {
 
             // Verify persistence after restart
             let (storage_tx2, _) = mpsc::unbounded_channel();
-            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2)).unwrap();
+            let db2 = KeyValueDb::new(Some(db_path), Some(storage_tx2), &table_name).unwrap();
 
             // Check deleted key is still gone
             let get_op4 = Operation {
                 id: 1006,
                 name: "GET".to_string(),
-                args: vec!["key5".to_string()],
+                args: vec!["usertable_user5".to_string()],
             };
 
-            let result = db2.execute(&get_op4, 1006.into());
-            assert_eq!(result, "GET key5 null");
+            let result = db2.execute_operation(&get_op4, 1006.into());
+            assert_eq!(result, "GET usertable_user5 null");
 
             // Check other keys survived
             let get_op5 = Operation {
                 id: 1007,
                 name: "GET".to_string(),
-                args: vec!["key6".to_string()],
+                args: vec!["usertable_user6".to_string()],
             };
 
-            let result = db2.execute(&get_op5, 1007.into());
-            assert_eq!(result, "GET key6 value6");
+            let result = db2.execute_operation(&get_op5, 1007.into());
+            assert_eq!(result, "GET usertable_user6 value6");
         });
     }
 
     #[test]
     fn test_in_memory_mode() {
+        let mut table_name = HashSet::new();
+        table_name.insert("usertable_user".to_string());
+
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             // Initialize database with no path (in-memory only)
-            let db = KeyValueDb::new(None::<&Path>, None).unwrap();
+            let db = KeyValueDb::new(None::<&Path>, None, &table_name).unwrap();
 
             // Test operations work in memory
             let put_op = Operation {
                 id: 1,
                 name: "PUT".to_string(),
-                args: vec!["memory_key".to_string(), "memory_value".to_string()],
+                args: vec!["usertable_user1".to_string(), "memory_value".to_string()],
             };
 
-            db.execute(&put_op, 1.into());
+            db.execute_operation(&put_op, 1.into());
 
             let get_op = Operation {
                 id: 2,
                 name: "GET".to_string(),
-                args: vec!["memory_key".to_string()],
+                args: vec!["usertable_user1".to_string()],
             };
 
-            let result = db.execute(&get_op, 2.into());
-            assert_eq!(result, "GET memory_key memory_value");
+            let result = db.execute_operation(&get_op, 2.into());
+            assert_eq!(result, "GET usertable_user1 memory_value");
 
             // Drop the database instance
             drop(db);
 
             // Creating a new instance should start with empty data
-            let db2 = KeyValueDb::new(None::<&Path>, None).unwrap();
+            let db2 = KeyValueDb::new(None::<&Path>, None, &table_name).unwrap();
 
             let get_op2 = Operation {
                 id: 3,
                 name: "GET".to_string(),
-                args: vec!["memory_key".to_string()],
+                args: vec!["usertable_user1".to_string()],
             };
 
             // Should not find the key from the previous in-memory instance
-            let result = db2.execute(&get_op2, 3.into());
-            assert_eq!(result, "GET memory_key null");
+            let result = db2.execute_operation(&get_op2, 3.into());
+            assert_eq!(result, "GET usertable_user1 null");
         });
     }
 }

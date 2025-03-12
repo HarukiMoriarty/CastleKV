@@ -8,7 +8,7 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
 use tracing::debug;
 
-use super::{extract_key_number, form_key, metadata, CommandId};
+use super::{extract_key, form_key, metadata, CommandId};
 use rpc::gateway::db_client::DbClient;
 use rpc::gateway::{Command, CommandResult, Operation, Status};
 
@@ -69,18 +69,21 @@ impl Session {
             .await
             .context("Failed to get partition map")?;
         let partition_info = response.into_inner().partitions;
+        debug!("Get partition info: {partition_info:#?}");
 
         let mut txs = HashMap::new();
         let mut rxs = HashMap::new();
 
         // Connect to each partition server and rpc streams
+        let mut unique_servers = HashMap::new();
         for partition in &partition_info {
-            connect_to_server(&partition.server_address, name, &mut txs, &mut rxs)
+            unique_servers.insert(partition.server_address.clone(), true);
+        }
+
+        for server_address in unique_servers.keys() {
+            connect_to_server(server_address, name, &mut txs, &mut rxs)
                 .await
-                .context(format!(
-                    "Failed to connect to server: {}",
-                    partition.server_address
-                ))?;
+                .context(format!("Failed to connect to server: {}", server_address))?;
         }
 
         Ok(Self {
@@ -117,18 +120,22 @@ impl Session {
         &self.name
     }
 
-    /// Determines which server is responsible for a specific key.
+    /// Determines which server is responsible for a specific key in a specific table.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to look up
+    /// * `table_name` - The table for the key
+    /// * `key` - The numeric key value
     ///
     /// # Returns
     ///
     /// The server address responsible for the key, or None if no server is found
-    fn get_server_for_key(&self, key: u64) -> Option<&str> {
+    fn get_server_for_key(&self, table_name: &str, key: u64) -> Option<&str> {
         for partition in &self.partition_info {
-            if key >= partition.start_key && key <= partition.end_key {
+            if partition.table_name == table_name
+                && key >= partition.start_key
+                && key <= partition.end_key
+            {
                 return Some(&partition.server_address);
             }
         }
@@ -188,11 +195,17 @@ impl Session {
         if (name == "GET" || name == "DELETE" || name == "PUT" || name == "SWAP")
             && !args.is_empty()
         {
-            let key = extract_key_number(&args[0]);
+            let (table_name, key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
             let server_addr = self
-                .get_server_for_key(key)
+                .get_server_for_key(&table_name, key)
                 .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("No partition server found for key: {}", key))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No partition server found for table: {}, key: {}",
+                        table_name,
+                        key
+                    )
+                })?;
 
             let id = self.next_op_id.unwrap();
             self.next_op_id = Some(id + 1);
@@ -217,20 +230,33 @@ impl Session {
         }
         // Handle scan operations that might span multiple partitions
         else if name == "SCAN" && args.len() >= 2 {
-            let start_key = extract_key_number(&args[0]);
-            let end_key = extract_key_number(&args[1]);
+            let (start_table, start_key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
+            let (end_table, end_key) = extract_key(&args[1]).map_err(|e| anyhow::anyhow!(e))?;
 
             // Check if start and end are valid
+            if start_table != end_table {
+                bail!("SCAN operation must operate within the same table");
+            }
+
             if start_key > end_key {
                 bail!("Invalid scan range: start key must be less or equal than end key");
             }
+
+            let table_name = start_table;
 
             // For each partition, create a scan operation if the range overlaps
             let mut added_to_any_server = false;
             let id = self.next_op_id.unwrap();
             self.next_op_id = Some(id + 1);
 
-            for partition in &self.partition_info {
+            // Filter to only relevant partitions for this table
+            let relevant_partitions: Vec<&PartitionInfo> = self
+                .partition_info
+                .iter()
+                .filter(|p| p.table_name == table_name)
+                .collect();
+
+            for partition in relevant_partitions {
                 // Check if scan range overlaps with this partition
                 if !(end_key < partition.start_key || start_key > partition.end_key) {
                     added_to_any_server = true;
@@ -249,7 +275,10 @@ impl Session {
                     };
 
                     // Create a new scan operation for this partition
-                    let scan_args = vec![form_key(effective_start), form_key(effective_end)];
+                    let scan_args = vec![
+                        form_key(&table_name, effective_start),
+                        form_key(&table_name, effective_end),
+                    ];
 
                     let op = Operation {
                         id,
@@ -272,7 +301,10 @@ impl Session {
             }
 
             if !added_to_any_server {
-                bail!("Scan range does not overlap with any partition");
+                bail!(
+                    "Scan range does not overlap with any partition for table: {}",
+                    table_name
+                );
             }
         } else {
             bail!("Unknown operation");
@@ -303,7 +335,6 @@ impl Session {
                 let mut results = Vec::new();
 
                 for (server_addr, cmd) in cmds {
-                    // Keep retrying until successful
                     loop {
                         // Send command to server
                         let tx = txs

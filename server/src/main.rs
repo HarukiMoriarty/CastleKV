@@ -102,8 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = cli.validate() {
         return Err(err.into());
     }
-    let config = ServerConfig::from(cli);
+    let mut config = ServerConfig::from(cli);
     info!("{:#?}", config);
+
+    // Connect manager to get partition information
+    server::connect_manager(&mut config).await.unwrap();
 
     server::run_server(&config).await
 }
