@@ -115,11 +115,11 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
 
             // Handle single-command results (GET, PUT, SWAP, DELETE)
             if cmd_results.len() == 1 {
-                return handle_single_command_result(&cmd_results[0]);
+                handle_single_command_result(&cmd_results[0])
             }
             // Handle multi-command results (SCAN across partitions)
             else {
-                return handle_scan_results(&cmd_results);
+                handle_scan_results(&cmd_results)
             }
         }
         Err(e) => Err(error(e)),
