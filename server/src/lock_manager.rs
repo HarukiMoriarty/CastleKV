@@ -3,57 +3,98 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
+/// Lock modes
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LockMode {
+    /// Multiple readers can hold the lock simultaneously
     Shared,
+    /// Only a single writer can hold the lock
     Exclusive,
+    /// No lock is held
     #[default]
     Unlocked,
 }
 
 impl LockMode {
+    /// Check if this lock mode conflicts with another
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other lock mode to check against
     fn conflict_with(&self, other: LockMode) -> bool {
         match self {
+            // Shared locks conflict with exclusive locks
             LockMode::Shared => other == LockMode::Exclusive,
+            // Exclusive locks conflict with any other lock
             LockMode::Exclusive => true,
+            // Unlocked never conflicts
             LockMode::Unlocked => false,
         }
     }
 }
 
+/// Result of an attempt to acquire a lock
 #[derive(Debug)]
 pub enum AcquireLockResult {
+    /// Lock was successfully acquired
     Acquired {
+        /// Other commands that now also own the lock
         other_owners: Vec<CommandId>,
+        /// Commands that were aborted due to conflicts
         aborted_cmds: Vec<CommandId>,
     },
+    /// Command must wait for the lock
     Waiting {
+        /// Commands that were aborted due to conflicts
         aborted_cmds: Vec<CommandId>,
     },
 }
 
+/// Channel sender type for the lock manager
 pub type LockManagerSender = mpsc::UnboundedSender<LockManagerMessage>;
+/// Channel receiver type for the lock manager
 type LockManagerReceiver = mpsc::UnboundedReceiver<LockManagerMessage>;
 
+/// Messages that can be sent to the lock manager
 pub enum LockManagerMessage {
+    /// Request to acquire locks
     AcquireLocks {
+        /// Command ID requesting the locks
         cmd_id: CommandId,
+        /// List of keys and lock modes to acquire
         lock_requests: Vec<(String, LockMode)>,
+        /// Channel for sending the response
         resp_tx: oneshot::Sender<bool>,
     },
+    /// Request to release all locks held by a command
     ReleaseLocks {
+        /// Command ID releasing locks
         cmd_id: CommandId,
     },
 }
 
+/// Represents a lock on a single key
 #[derive(Clone, Debug, Default)]
 struct Lock {
+    /// Current mode of the lock
     mode: LockMode,
+    /// Commands that currently own the lock
     owners: Vec<CommandId>,
+    /// Commands waiting to acquire the lock
     waiters: VecDeque<(CommandId, LockMode)>,
 }
 
 impl Lock {
+    /// Attempt to acquire the lock
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd_id` - Command ID requesting the lock
+    /// * `lock_mode` - Mode of the lock being requested
+    ///
+    /// # Returns
+    ///
+    /// * `AcquireLockResult` - Result of the acquisition attempt
     fn acquire_lock(&mut self, cmd_id: CommandId, lock_mode: LockMode) -> AcquireLockResult {
         let mut aborted_cmds = Vec::new();
 
@@ -122,7 +163,7 @@ impl Lock {
                 AcquireLockResult::Waiting { aborted_cmds }
             }
         }
-        // The current txn is not blocked by anyone
+        // The current cmd is not blocked by anyone
         else {
             // This must succeed
             assert!(insert_to_owners(
@@ -140,15 +181,24 @@ impl Lock {
         }
     }
 
+    /// Release a lock held by a command
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd_id` - Command ID releasing the lock
+    ///
+    /// # Returns
+    ///
+    /// * `Vec<CommandId>` - Commands that now own the lock after release
     fn release_lock(&mut self, cmd_id: CommandId) -> Vec<CommandId> {
-        // Remove the current txn from the owners list, set the lock mode to unlocked if
+        // Remove the current cmd from the owners list, set the lock mode to unlocked if
         // no one else owns the lock
         self.owners.retain(|&id| id != cmd_id);
         if self.owners.is_empty() {
             self.mode = LockMode::Unlocked;
         }
 
-        // Remove the current txn from the waiting list
+        // Remove the current cmd from the waiting list
         self.waiters.retain(|(id, _)| *id != cmd_id);
 
         // If no one is waiting, return immediately
@@ -161,6 +211,18 @@ impl Lock {
     }
 }
 
+/// Insert a command into the owners list
+///
+/// # Arguments
+///
+/// * `owners` - List of command IDs that own the lock
+/// * `owners_mode` - Current mode of the lock
+/// * `cmd_id` - Command ID to insert
+/// * `mode` - Mode of the current command
+///
+/// # Returns
+///
+/// * `bool` - True if insertion succeeded, false otherwise
 fn insert_to_owners(
     owners: &mut Vec<CommandId>,
     owners_mode: &mut LockMode,
@@ -182,6 +244,17 @@ fn insert_to_owners(
     }
 }
 
+/// Grant locks to waiting commands
+///
+/// # Arguments
+///
+/// * `owners` - List of command IDs that own the lock
+/// * `waiters` - Queue of commands waiting for the lock
+/// * `mode` - Current mode of the lock
+///
+/// # Returns
+///
+/// * `Vec<CommandId>` - Commands that were granted the lock
 fn grant_lock_to_waiters(
     owners: &mut Vec<CommandId>,
     waiters: &mut VecDeque<(CommandId, LockMode)>,
@@ -199,17 +272,22 @@ fn grant_lock_to_waiters(
     new_owners
 }
 
+/// Lock manager for handling distributed locks
 pub struct LockManager {
+    /// Channel for receiving lock manager messages
     rx: LockManagerReceiver,
+    /// Map of key to lock
     locks: HashMap<String, Lock>,
+    /// Map of command ID to response channels
     cmd_channels: HashMap<CommandId, Vec<oneshot::Sender<bool>>>,
-    // Track which locks are held by each command
+    /// Map of command ID to set of acquired keys
     cmd_acquired_keys: HashMap<CommandId, HashSet<String>>,
-    // Number of keys each waiting command still needs
+    /// Map of command ID to count of keys it's still waiting for
     cmd_waiting_keys: HashMap<CommandId, usize>,
 }
 
 impl LockManager {
+    /// Create a new lock manager
     pub fn new(rx: LockManagerReceiver) -> Self {
         Self {
             rx,
@@ -220,9 +298,16 @@ impl LockManager {
         }
     }
 
+    /// Handle commands that have gained ownership of locks
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key that has new owners
+    /// * `new_owners` - The command IDs that now own the lock
     fn handle_new_owners(&mut self, key: &str, new_owners: Vec<CommandId>) {
         for owner_id in new_owners {
-            debug!("{owner_id:?} gain lock {key:?}");
+            debug!("{owner_id:?} gained lock on {key:?}");
+
             // Add this key to their acquired locks
             self.cmd_acquired_keys
                 .entry(owner_id)
@@ -232,9 +317,10 @@ impl LockManager {
             // Decrease their remaining keys count
             if let Some(count) = self.cmd_waiting_keys.get_mut(&owner_id) {
                 *count -= 1;
+
                 // If they've gotten all their keys, notify them
                 if *count == 0 {
-                    debug!("Notify {owner_id:?}");
+                    debug!("Notifying {owner_id:?} - all locks acquired");
                     if let Some(channels) = self.cmd_channels.remove(&owner_id) {
                         for resp in channels {
                             let _ = resp.send(true);
@@ -246,6 +332,7 @@ impl LockManager {
         }
     }
 
+    /// Run the lock manager
     pub async fn run(mut self) {
         info!("Lock manager started");
 
@@ -268,20 +355,24 @@ impl LockManager {
                     // Try to acquire all locks
                     for (key, mode) in &lock_requests {
                         let lock = self.locks.entry(key.clone()).or_default();
-                        debug!("{key:?} Lock {lock:?}");
+                        debug!("Key {key:?} - Current lock state: {lock:?}");
+
                         match lock.acquire_lock(cmd_id, *mode) {
                             AcquireLockResult::Acquired {
                                 other_owners,
                                 aborted_cmds,
                             } => {
-                                debug!("Acquired lock {key:?}: other owners {other_owners:?}, aborted cmds {aborted_cmds:?}");
+                                debug!("Acquired lock on {key:?}: other owners {other_owners:?}, aborted cmds {aborted_cmds:?}");
                                 acquired_keys.push(key.clone());
                                 all_aborted_cmds.extend(aborted_cmds);
+
                                 // Handle other owners that got granted this lock
                                 self.handle_new_owners(key, other_owners);
                             }
                             AcquireLockResult::Waiting { aborted_cmds } => {
-                                debug!("Waiting lock {key:?}: aborted cmds {aborted_cmds:?}");
+                                debug!(
+                                    "Waiting for lock on {key:?}: aborted cmds {aborted_cmds:?}"
+                                );
                                 all_aborted_cmds.extend(aborted_cmds);
                                 all_acquired = false;
                                 break;
@@ -291,6 +382,7 @@ impl LockManager {
 
                     // Notify aborted commands
                     for cmd_to_abort in all_aborted_cmds {
+                        debug!("Notifying aborted command {cmd_to_abort:?}");
                         if let Some(channels) = self.cmd_channels.remove(&cmd_to_abort) {
                             for resp in channels {
                                 let _ = resp.send(false);
@@ -298,15 +390,22 @@ impl LockManager {
                         }
                     }
 
+                    // Handle result for the requesting command
                     if all_acquired {
                         // Track acquired locks
                         let cmd_acquired_keys = self.cmd_acquired_keys.entry(cmd_id).or_default();
                         for key in acquired_keys {
                             cmd_acquired_keys.insert(key);
                         }
+
+                        debug!("Command {cmd_id:?} acquired all requested locks");
                         let _ = resp_tx.send(true);
                     } else {
                         // Store response channel for waiting
+                        debug!(
+                            "Command {cmd_id:?} is waiting for {} locks",
+                            lock_requests.len() - acquired_keys.len()
+                        );
                         self.cmd_channels.entry(cmd_id).or_default().push(resp_tx);
                         *self.cmd_waiting_keys.entry(cmd_id).or_default() +=
                             lock_requests.len() - acquired_keys.len();
@@ -314,18 +413,25 @@ impl LockManager {
                 }
 
                 LockManagerMessage::ReleaseLocks { cmd_id } => {
-                    debug!("Releasing all locks for cmd {}", cmd_id);
+                    debug!("Releasing all locks for command {cmd_id:?}");
+
                     if let Some(cmd_acquired_keys) = self.cmd_acquired_keys.remove(&cmd_id) {
                         for key in cmd_acquired_keys {
                             if let Some(lock) = self.locks.get_mut(&key) {
+                                debug!("Releasing lock on {key:?}");
                                 let new_owners = lock.release_lock(cmd_id);
                                 self.handle_new_owners(&key, new_owners);
                             }
                         }
                     }
+
+                    // Clean up any pending channels or waiting keys
                     self.cmd_channels.remove(&cmd_id);
+                    self.cmd_waiting_keys.remove(&cmd_id);
                 }
             }
         }
+
+        info!("Lock manager stopped");
     }
 }

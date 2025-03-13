@@ -1,43 +1,28 @@
 use bincode;
-use common::CommandId;
 use glob;
-use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot;
-use tracing::{debug, error, info};
+use tracing::debug;
 
-use crate::database::KeyValueDb;
-use crate::plan::Plan;
+use crate::log_manager::comm::LogEntry;
 
-pub type LogManagerSender = UnboundedSender<LogManagerMessage>;
-type LogManagerReceiver = UnboundedReceiver<LogManagerMessage>;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct LogCommand {
-    cmd_id: CommandId,
-    pub(crate) ops: Vec<(String, String)>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct LogEntry {
-    term: u64,
-    pub(crate) index: u64,
-    pub(crate) command: LogCommand,
-}
-
-/// A single log segment
-struct Segment {
+/// A single log segment file
+pub(crate) struct Segment {
+    /// File handle for this segment
     file: File,
+    /// Path to this segment file
     path: String,
+    /// Starting index of entries in this segment
     start_index: u64,
 }
 
 impl Segment {
     /// Creates or opens a log segment
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File path for the segment
+    /// * `start_index` - First log index in this segment
     pub fn new(path: &str, start_index: u64) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
@@ -52,6 +37,10 @@ impl Segment {
     }
 
     /// Appends a log entry to the current segment and ensures it's persisted
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The log entry to append
     pub fn append(&mut self, entry: &LogEntry) -> io::Result<()> {
         let data =
             bincode::serialize(entry).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -66,25 +55,37 @@ impl Segment {
         self.file.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
         self.file.read_to_end(&mut buf)?;
+
         let mut cursor = std::io::Cursor::new(buf);
         let mut entries = Vec::new();
+
         while let Ok(entry) = bincode::deserialize_from::<_, LogEntry>(&mut cursor) {
             entries.push(entry);
         }
+
         Ok(entries)
     }
 }
 
-/// Raft persistent log manager with segmented storage support
-pub struct RaftLog {
+/// Raft log manager with segmented storage support
+pub(crate) struct RaftLog {
+    /// Closed (archived) log segments
     segments: Vec<Segment>,
+    /// Current active segment for writing
     current_segment: Segment,
+    /// Base directory for log files
     base_path: String,
-    max_segment_size: usize, // Maximum size of each segment
+    /// Maximum size of each segment in bytes
+    max_segment_size: usize,
 }
 
 impl RaftLog {
     /// Opens or creates a log, handling recovery automatically
+    ///
+    /// # Arguments
+    ///
+    /// * `base_path` - Directory for log files
+    /// * `max_segment_size` - Maximum size of each segment in bytes
     pub fn open(base_path: &str, max_segment_size: usize) -> io::Result<Self> {
         // Create directory if it doesn't exist
         std::fs::create_dir_all(base_path)?;
@@ -173,143 +174,50 @@ impl RaftLog {
     }
 
     /// Appends a new log entry and creates a new segment when the current one reaches its size limit
-    fn append(&mut self, entry: LogEntry) -> io::Result<()> {
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Log entry to append
+    pub fn append(&mut self, entry: LogEntry) -> io::Result<()> {
         // Check current segment size, create a new one if it exceeds the limit
         let file_size = self.current_segment.file.metadata()?.len() as usize;
         if file_size > self.max_segment_size {
             // Archive the old segment
+            let new_segment_path = format!(
+                "{}/raft_log_segment_{}.log",
+                self.base_path,
+                self.segments.len() + 1
+            );
+
+            debug!(
+                "Creating new log segment: {} (current size: {} bytes)",
+                new_segment_path, file_size
+            );
+
             self.segments.push(std::mem::replace(
                 &mut self.current_segment,
-                Segment::new(
-                    &format!(
-                        "{}/raft_log_segment_{}.log",
-                        self.base_path,
-                        self.segments.len() + 1
-                    ),
-                    entry.index,
-                )?,
+                Segment::new(&new_segment_path, entry.index)?,
             ));
         }
+
         self.current_segment.append(&entry)
     }
 
     /// Loads all log entries from all segments
-    fn load_all_entries(&mut self) -> io::Result<Vec<LogEntry>> {
+    pub fn load_all_entries(&mut self) -> io::Result<Vec<LogEntry>> {
         let mut all_entries = Vec::new();
-        for segment in &mut self.segments {
+
+        // Load entries from all archived segments
+        for (i, segment) in self.segments.iter_mut().enumerate() {
+            debug!("Loading entries from segment {}", i);
             let mut entries = segment.load_entries()?;
             all_entries.append(&mut entries);
         }
+
+        // Load entries from the current segment
         let mut current_entries = self.current_segment.load_entries()?;
         all_entries.append(&mut current_entries);
+
         Ok(all_entries)
-    }
-}
-
-pub enum LogManagerMessage {
-    AppendEntry {
-        cmd_id: CommandId,
-        ops: Vec<(String, String)>,
-        resp_tx: oneshot::Sender<u64>,
-    },
-}
-
-pub struct LogManager {
-    log: RaftLog,
-    rx: LogManagerReceiver,
-    db: Arc<KeyValueDb>,
-}
-
-impl LogManager {
-    pub fn new(
-        log_path: Option<impl AsRef<Path>>,
-        rx: LogManagerReceiver,
-        db: Arc<KeyValueDb>,
-        max_segment_size: usize,
-    ) -> Self {
-        let path_str = log_path
-            .as_ref()
-            .map(|p| p.as_ref().to_str().unwrap())
-            .unwrap_or("raft");
-
-        // RaftLog::open handles directory creation/recovery
-        let mut log = match RaftLog::open(path_str, max_segment_size) {
-            Ok(log) => {
-                info!("Successfully opened log at {}", path_str);
-                log
-            }
-            Err(e) => {
-                error!("Failed to open log: {}, retrying...", e);
-                RaftLog::open(path_str, max_segment_size).unwrap()
-            }
-        };
-
-        // Load all log entries into in-memory DB and storage
-        let entries = log.load_all_entries().unwrap();
-        info!("Loaded {} log entries", entries.len());
-        for entry in entries {
-            debug!("Log entry: {:?}", entry);
-
-            let plan = Plan::from_log_entry(entry).unwrap();
-            db.execute(&plan);
-        }
-
-        LogManager { log, rx, db }
-    }
-
-    pub async fn run(mut self) {
-        let mut rx = self.rx;
-
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                LogManagerMessage::AppendEntry {
-                    ops,
-                    cmd_id,
-                    resp_tx,
-                } => {
-                    // TODO: use raft to determine term and log index
-                    let term = 0;
-                    let index = 0;
-
-                    let entry = LogEntry {
-                        term,
-                        index,
-                        command: LogCommand { cmd_id, ops },
-                    };
-                    info!("Appending log entry: {:?}", entry);
-
-                    // retry append log entry if failed
-                    match self.log.append(entry.clone()) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::error!("Failed to append log entry: {}", e);
-                            let mut retry_count = 0;
-                            const MAX_RETRIES: usize = 3;
-
-                            while retry_count < MAX_RETRIES {
-                                match self.log.append(entry.clone()) {
-                                    Ok(_) => break,
-                                    Err(e) => {
-                                        retry_count += 1;
-                                        tracing::warn!(
-                                            "Retry {}/{} failed: {}",
-                                            retry_count,
-                                            MAX_RETRIES,
-                                            e
-                                        );
-                                        if retry_count == MAX_RETRIES {
-                                            tracing::error!(
-                                                "Max retries reached, giving up on append"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    resp_tx.send(index).unwrap();
-                }
-            }
-        }
     }
 }

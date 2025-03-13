@@ -18,15 +18,22 @@ use rpc::manager::{manager_service_client::ManagerServiceClient, RegisterServerR
 use std::sync::Arc;
 use storage::Storage;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{error, info};
 
+/// Connect to the manager and register this server
+///
+/// # Arguments
+///
+/// * `config` - Server configuration, will be updated with partition information
 pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let manager_addr = format!("http://{}", config.manager_addr);
+
+    // Attempt to connect to manager with retry
     let mut manager_client = loop {
         match ManagerServiceClient::connect(manager_addr.clone()).await {
             Ok(manager_client) => break manager_client,
             Err(e) => {
-                debug!(
+                error!(
                     "Failed to connect to manager: {}, error: {}. Retrying...",
                     config.manager_addr, e
                 );
@@ -40,6 +47,7 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
         server_address: config.listen_addr.clone(),
     };
 
+    // Register this server with the manager
     let response = manager_client
         .register_server(request)
         .await
@@ -61,7 +69,7 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
     // Process assigned partitions from the response
     for partition in response.assigned_partitions {
         // Add the table name to the set
-        config.table_name.insert(partition.table_name.clone());
+        assert!(config.table_name.insert(partition.table_name.clone()));
 
         // Add the partition range to the map
         config.partition_info.insert(
@@ -69,7 +77,7 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
             (partition.start_key, partition.end_key),
         );
 
-        debug!(
+        info!(
             "Server assigned table '{}' partition range: {} to {}",
             partition.table_name, partition.start_key, partition.end_key
         );
@@ -83,55 +91,65 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Run the server with all its components
+///
+/// # Arguments
+///
+/// * `config` - Server configuration
 pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Set up communication channels between components
     let (executor_tx, executor_rx) = mpsc::unbounded_channel();
-    let (lock_mananger_tx, lock_manager_rx) = mpsc::unbounded_channel();
+    let (lock_manager_tx, lock_manager_rx) = mpsc::unbounded_channel();
+    let (log_manager_tx, log_manager_rx) = mpsc::unbounded_channel();
+
+    // Set up storage channels if persistence is enabled
     let (storage_tx, storage_rx) = if config.persistence_enabled {
-        let (storage_tx, storage_rx) = mpsc::unbounded_channel();
-        (Some(storage_tx), Some(storage_rx))
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
     } else {
         (None, None)
     };
-    let (log_manager_tx, log_manager_rx) = mpsc::unbounded_channel();
 
-    // Start executor.
+    // Initialize the database
     let db = Arc::new(KeyValueDb::new(
         config.db_path.clone(),
         storage_tx,
         &config.table_name,
     )?);
+
+    // Start executor
     let executor = Executor::new(
         config.clone(),
         executor_rx,
         log_manager_tx,
-        lock_mananger_tx,
+        lock_manager_tx,
         db.clone(),
     );
     tokio::spawn(executor.run());
-    info!("Start executor");
+    info!("Started executor service");
 
+    // Start storage service if persistence is enabled
     if config.persistence_enabled {
-        // Start storage.
         let storage = Storage::new(config, storage_rx.unwrap())?;
         tokio::spawn(storage.run());
-        info!("Start storage service");
+        info!("Started storage service");
     }
 
-    // Start log manager.
+    // Start log manager
     let log_manager = LogManager::new(config.log_path.clone(), log_manager_rx, db.clone(), 1024);
     tokio::spawn(log_manager.run());
-    info!("Start log manager");
+    info!("Started log manager service");
 
-    // Start lock manager.
+    // Start lock manager
     let lock_manager = LockManager::new(lock_manager_rx);
     tokio::spawn(lock_manager.run());
-    info!("Start lock manager");
+    info!("Started lock manager service");
 
-    // Start gateway.
+    // Start gateway (gRPC server)
     let addr = config.listen_addr.parse()?;
     let gateway = GatewayService::new(executor_tx);
 
-    info!("Start gateway on {}", addr);
+    info!("Starting gateway server on {}", addr);
     tonic::transport::Server::builder()
         .add_service(rpc::gateway::db_server::DbServer::new(gateway))
         .serve(addr)

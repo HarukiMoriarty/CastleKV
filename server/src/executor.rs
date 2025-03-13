@@ -19,7 +19,7 @@ type ExecutorReceiver = mpsc::UnboundedReceiver<ExecutorMessage>;
 pub enum ExecutorMessage {
     NewClient {
         stream: Streaming<Command>,
-        result_tx: mpsc::Sender<Result<CommandResult, tonic::Status>>,
+        result_tx: mpsc::UnboundedSender<Result<CommandResult, tonic::Status>>,
     },
 }
 
@@ -98,7 +98,7 @@ impl Executor {
                                                     has_err: true,
                                                 };
 
-                                                if result_tx.send(Ok(result)).await.is_err() {
+                                                if result_tx.send(Ok(result)).is_err() {
                                                     warn!("Client disconnected");
                                                     break;
                                                 }
@@ -175,7 +175,7 @@ impl Executor {
                                         }
                                     };
 
-                                    if result_tx.send(Ok(result)).await.is_err() {
+                                    if result_tx.send(Ok(result)).is_err() {
                                         warn!("Client disconnected");
                                         break;
                                     }

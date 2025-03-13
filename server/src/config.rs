@@ -1,8 +1,9 @@
-use common::NodeId;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
+
+use common::NodeId;
 
 /// Server configuration parameters
 #[derive(Debug, Clone)]
@@ -19,7 +20,7 @@ pub struct ServerConfig {
     /// Directory path for log files
     pub log_path: Option<PathBuf>,
 
-    /// Address of the manager
+    /// Address of the manager node
     pub manager_addr: String,
 
     /// Enable database persistence
@@ -31,10 +32,10 @@ pub struct ServerConfig {
     /// Timeout in milliseconds before a batch is flushed even if not full
     pub batch_timeout_ms: Option<u64>,
 
-    /// Table name
+    /// Set of table names
     pub table_name: HashSet<String>,
 
-    /// Partition infomation
+    /// Partition information mapping table names to (start, end) partition key ranges
     pub partition_info: HashMap<String, (u64, u64)>,
 }
 
@@ -56,17 +57,17 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// Create a new ServerConfig with default values
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a builder to construct a ServerConfig with custom values
     pub fn builder() -> ServerConfigBuilder {
-        ServerConfigBuilder::new()
+        ServerConfigBuilder::default()
     }
 }
 
+/// Builder for creating ServerConfig with custom values
 #[derive(Default)]
 pub struct ServerConfigBuilder {
     config: ServerConfig,
@@ -74,48 +75,74 @@ pub struct ServerConfigBuilder {
 
 impl ServerConfigBuilder {
     pub fn new() -> Self {
-        Self {
-            config: ServerConfig::default(),
-        }
+        Self::default()
     }
 
+    /// Set the node ID
     pub fn node_id(mut self, node_id: u32) -> Self {
         self.config.node_id = NodeId(node_id);
         self
     }
 
+    /// Set the listen address
     pub fn listen_addr(mut self, addr: impl Into<String>) -> Self {
         self.config.listen_addr = addr.into();
         self
     }
 
-    pub fn db_path(mut self, path: Option<PathBuf>) -> Self {
-        self.config.db_path = path;
+    /// Set the persistent database path
+    pub fn db_path(mut self, path: impl Into<Option<PathBuf>>) -> Self {
+        self.config.db_path = path.into();
         self
     }
 
-    pub fn log_path(mut self, path: Option<PathBuf>) -> Self {
-        self.config.log_path = path;
+    /// Set the persistent log path
+    pub fn log_path(mut self, path: impl Into<Option<PathBuf>>) -> Self {
+        self.config.log_path = path.into();
         self
     }
 
+    /// Set the manager address
     pub fn manager_addr(mut self, addr: impl Into<String>) -> Self {
         self.config.manager_addr = addr.into();
         self
     }
 
+    /// Enable or disable persistence
     pub fn persistence_enabled(mut self, enabled: bool) -> Self {
         self.config.persistence_enabled = enabled;
         self
     }
 
-    pub fn batch_size(mut self, size: Option<usize>) -> Self {
-        self.config.batch_size = size;
+    /// Set the batch size
+    pub fn batch_size(mut self, size: impl Into<Option<usize>>) -> Self {
+        self.config.batch_size = size.into();
         self
     }
 
-    pub fn batch_timeout_ms(mut self, timeout: Option<u64>) -> Self {
-        self.config.batch_timeout_ms = timeout;
+    /// Set the batch timeout in milliseconds
+    pub fn batch_timeout_ms(mut self, timeout: impl Into<Option<u64>>) -> Self {
+        self.config.batch_timeout_ms = timeout.into();
+        self
+    }
+
+    /// Add a table name
+    pub fn add_table(mut self, table: impl Into<String>) -> Self {
+        self.config.table_name.insert(table.into());
+        self
+    }
+
+    /// Add multiple table names
+    pub fn add_tables(mut self, tables: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        for table in tables {
+            self.config.table_name.insert(table.into());
+        }
+        self
+    }
+
+    /// Add partition information for a table
+    pub fn add_partition(mut self, table: impl Into<String>, range: (u64, u64)) -> Self {
+        self.config.partition_info.insert(table.into(), range);
         self
     }
 

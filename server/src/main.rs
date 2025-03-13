@@ -42,9 +42,10 @@ struct Cli {
 }
 
 impl Cli {
+    /// Validate command line arguments for consistency
     fn validate(&self) -> Result<(), String> {
         if self.persistence {
-            // When persistence is true, db_path, batch_size, and batch_timeout must be set
+            // When persistence is enabled, certain parameters must be provided
             if self.db_path.is_none() {
                 return Err("db_path must be specified when persistence is enabled".to_string());
             }
@@ -57,7 +58,7 @@ impl Cli {
                 );
             }
         } else {
-            // When persistence is false, db_path, batch_size, and batch_timeout must be None
+            // When persistence is disabled, these parameters should not be provided
             if self.db_path.is_some() {
                 return Err(
                     "db_path must not be specified when persistence is disabled".to_string()
@@ -95,18 +96,23 @@ impl From<Cli> for ServerConfig {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
     set_default_rust_log("info");
     init_tracing();
 
+    // Parse and validate command line arguments
     let cli = Cli::parse();
     if let Err(err) = cli.validate() {
         return Err(err.into());
     }
+
+    // Convert to server configuration
     let mut config = ServerConfig::from(cli);
-    info!("{:#?}", config);
+    info!("Server configuration: {:#?}", config);
 
-    // Connect manager to get partition information
-    server::connect_manager(&mut config).await.unwrap();
+    // Connect to manager to get partition information
+    server::connect_manager(&mut config).await?;
 
+    // Run the server
     server::run_server(&config).await
 }
