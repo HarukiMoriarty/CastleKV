@@ -66,43 +66,13 @@ async fn main() -> anyhow::Result<()> {
                     _ => error(format!("unknown command: {line}")),
                 };
 
-                // Calculate elapsed time if timing is enabled
-                let elapsed = timer.map(|timer| timer.elapsed());
-
                 // Print command output
                 println!("{output}");
 
                 // Print timing information if enabled
-                if let Some(elapsed) = elapsed {
-                    let elapsed_secs = elapsed.as_secs();
-                    let elapsed_subsec_millis = elapsed.subsec_millis();
-                    let elapsed_subsec_micros = elapsed.subsec_micros();
-                    let elapsed_subsec_nanos = elapsed.subsec_nanos();
-                    let (elapsed, unit): (f32, &str) = if elapsed_secs > 0 {
-                        (
-                            format!("{elapsed_secs}.{elapsed_subsec_millis}")
-                                .parse()
-                                .unwrap(),
-                            "s",
-                        )
-                    } else if elapsed_subsec_millis > 0 {
-                        (
-                            format!("{elapsed_subsec_millis}.{elapsed_subsec_micros}")
-                                .parse()
-                                .unwrap(),
-                            "ms",
-                        )
-                    } else if elapsed_subsec_micros > 0 {
-                        (
-                            format!("{elapsed_subsec_micros}.{elapsed_subsec_nanos}")
-                                .parse()
-                                .unwrap(),
-                            "µs",
-                        )
-                    } else {
-                        (elapsed_subsec_nanos as f32, "ns")
-                    };
-                    println!("TIME: {elapsed:.2} {unit}");
+                if let Some(timer) = timer {
+                    let elapsed = timer.elapsed();
+                    print_elapsed_time(elapsed);
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -115,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(err) => {
                 // Handle other errors
-                error(err);
+                println!("{}", error(err));
                 break;
             }
         }
@@ -123,9 +93,42 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Formats and prints elapsed time with appropriate units
+fn print_elapsed_time(elapsed: std::time::Duration) {
+    let elapsed_secs = elapsed.as_secs();
+    let elapsed_millis = elapsed.subsec_millis();
+    let elapsed_micros = elapsed.subsec_micros();
+    let elapsed_nanos = elapsed.subsec_nanos();
+
+    let (elapsed, unit): (f32, &str) = if elapsed_secs > 0 {
+        (
+            format!("{}.{:03}", elapsed_secs, elapsed_millis)
+                .parse()
+                .unwrap(),
+            "s",
+        )
+    } else if elapsed_millis > 0 {
+        (
+            format!("{}.{:03}", elapsed_millis, elapsed_micros % 1000)
+                .parse()
+                .unwrap(),
+            "ms",
+        )
+    } else if elapsed_micros > 0 {
+        (
+            format!("{}.{:03}", elapsed_micros, elapsed_nanos % 1000)
+                .parse()
+                .unwrap(),
+            "µs",
+        )
+    } else {
+        (elapsed_nanos as f32, "ns")
+    };
+
+    println!("TIME: {:.2} {}", elapsed, unit);
+}
+
 /// Generates the command prompt string based on session state
-///
-/// Includes the operation ID if a command is in progress
 fn get_prompt(session: &mut Session) -> String {
     let mut prompt = String::new();
     if let Some(op_id) = session.get_next_op_id() {
@@ -143,6 +146,7 @@ fn tokenize(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut in_quote = false;
+
     for c in line.chars() {
         match c {
             ' ' if !in_quote => {
@@ -158,9 +162,11 @@ fn tokenize(line: &str) -> Vec<String> {
             }
         }
     }
+
     if !token.is_empty() {
         tokens.push(token);
     }
+
     tokens
 }
 
@@ -177,20 +183,25 @@ fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
 ///
 /// If no command is in progress, creates a new one and executes it immediately.
 async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
+    // Validate operation arguments
+    if tokens.len() < 2 {
+        return error("operation name required");
+    }
+
     match tokens[1].to_uppercase().as_str() {
         "GET" | "DELETE" => {
             if tokens.len() != 3 {
-                return error("invalid operation");
+                return error("GET/DELETE requires exactly one key");
             }
         }
         "SWAP" | "PUT" => {
             if tokens.len() != 4 {
-                return error("invalid operation");
+                return error("PUT/SWAP requires key and value");
             }
         }
         "SCAN" => {
             if tokens.len() != 4 {
-                return error("invalid operation");
+                return error("SCAN requires start and end keys");
             }
 
             // Check if both keys are for the same table
@@ -206,17 +217,26 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
                 }
             }
         }
-        _ => unreachable!(),
+        _ => return error(format!("unsupported operation: {}", tokens[1])),
     }
 
+    // Create a new command if one isn't already in progress
     let execute_immediately = session.get_next_op_id().is_none();
     if execute_immediately {
-        session.new_command().unwrap();
+        if let Err(e) = session.new_command() {
+            return error(e);
+        }
     }
+
+    // Get the operation ID before adding the operation
     let next_op_id = session.get_next_op_id().unwrap();
-    session
-        .add_operation(&tokens[1].to_uppercase(), &tokens[2..])
-        .unwrap();
+
+    // Add the operation to the command
+    if let Err(e) = session.add_operation(&tokens[1].to_uppercase(), &tokens[2..]) {
+        return error(e);
+    }
+
+    // Execute immediately if this wasn't part of a multi-operation command
     if execute_immediately {
         format_result(session.finish_command().await)
     } else {
@@ -227,14 +247,12 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
 /// Finish and execute the current command
 async fn handle_done(session: &mut Session, tokens: &[String]) -> String {
     if tokens.len() != 1 {
-        return error("invalid DONE command");
+        return error("DONE command takes no arguments");
     }
     format_result(session.finish_command().await)
 }
 
 /// Formats the results of a command execution for display
-///
-/// Handles special formatting for scan operations across multiple partitions.
 fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
     result.map_or_else(error, |cmd_results| {
         let mut output = Vec::new();
@@ -261,87 +279,24 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
                 continue;
             }
 
-            let first_result = results[0].clone();
+            let first_result = &results[0];
             let is_scan = first_result.content.trim_start().starts_with("SCAN ");
 
             if is_scan {
-                // Find min start key and max end key across all partitions
-                let mut min_start_key = None;
-                let mut max_end_key = None;
-                let mut table_name = None;
-                let mut scan_data = Vec::new();
-                let scan_has_err = results.iter().any(|o| o.has_err);
-
-                for result in results {
-                    let mut content_lines = result.content.lines();
-                    if let Some(first_line) = content_lines.next() {
-                        if first_line.trim().starts_with("SCAN ") {
-                            let parts: Vec<&str> = first_line.split_whitespace().collect();
-                            if parts.len() >= 3 {
-                                let (table_name_start, start_key) = extract_key(parts[1]).unwrap();
-                                let (table_name_end, end_key) = extract_key(parts[2]).unwrap();
-                                assert_eq!(table_name_start, table_name_end);
-                                if table_name.is_none() {
-                                    table_name = Some(table_name_start.clone())
-                                }
-                                assert_eq!(table_name, Some(table_name_start));
-
-                                // Update min start key
-                                if min_start_key.is_none() || start_key < min_start_key.unwrap() {
-                                    min_start_key = Some(start_key);
-                                }
-
-                                // Update max end key
-                                if max_end_key.is_none() || end_key > max_end_key.unwrap() {
-                                    max_end_key = Some(end_key);
-                                }
-                            }
-                        }
-                    }
-
-                    // Collect data lines
-                    for line in content_lines {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() && !trimmed.starts_with("SCAN ") {
-                            scan_data.push(trimmed.to_string());
-                        }
-                    }
-                }
-
-                // Format scan results
-                let mut scan_output = Vec::new();
-                let table = table_name.unwrap();
-
-                scan_output.push(format!(
-                    "SCAN {} {} BEGIN",
-                    form_key(&table, min_start_key.unwrap()),
-                    form_key(&table, max_end_key.unwrap())
-                ));
-
-                // Sort scan data by key value
-                scan_data.sort_by(|a, b| {
-                    let a_num: u64 = extract_key(a.split_whitespace().next().unwrap()).unwrap().1;
-                    let b_num: u64 = extract_key(b.split_whitespace().next().unwrap()).unwrap().1;
-                    a_num.cmp(&b_num)
-                });
-                for data_line in scan_data {
-                    scan_output.push(format!("  {}", data_line));
-                }
-                scan_output.push("SCAN END".to_string());
-
-                // Add the formatted output
-                if scan_has_err {
-                    output.push(format!("{}> {}", op_id, error(scan_output.join("\n"))));
-                } else {
-                    output.push(format!("{}> {}", op_id, scan_output.join("\n")));
-                }
+                format_scan_results(*op_id, results, &mut output);
             } else {
-                // Combine results for non-SCAN operations.
-                assert!(results.len() == 1);
-                let result = &results[0];
-                let has_err = result.has_err;
+                // Regular operation (should only have one result)
+                if results.len() != 1 {
+                    output.push(format!(
+                        "{}> {}",
+                        op_id,
+                        error("Unexpected multiple results for non-SCAN operation")
+                    ));
+                    continue;
+                }
 
-                if has_err {
+                let result = &results[0];
+                if result.has_err {
                     output.push(format!("{}> {}", op_id, error(&result.content)));
                 } else {
                     output.push(format!("{}> {}", op_id, result.content));
@@ -353,19 +308,108 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
         let any_aborted = cmd_results
             .iter()
             .any(|res| res.status == Status::Aborted.into());
-        if any_aborted {
-            output.push("ABORTED".to_owned());
+
+        output.push(if any_aborted {
+            "ABORTED".to_owned()
         } else {
-            output.push("COMMITTED".to_owned());
-        }
+            "COMMITTED".to_owned()
+        });
 
         output.join("\n")
     })
 }
 
+/// Format scan results from potentially multiple partitions
+fn format_scan_results(op_id: u32, results: &[OperationResult], output: &mut Vec<String>) {
+    // Find min start key and max end key across all partitions
+    let mut min_start_key = None;
+    let mut max_end_key = None;
+    let mut table_name = None;
+    let mut scan_data = Vec::new();
+    let scan_has_err = results.iter().any(|o| o.has_err);
+
+    for result in results {
+        let mut content_lines = result.content.lines();
+        if let Some(first_line) = content_lines.next() {
+            if first_line.trim().starts_with("SCAN ") {
+                let parts: Vec<&str> = first_line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let (table_name_start, start_key) = extract_key(parts[1]).unwrap();
+                    let (table_name_end, end_key) = extract_key(parts[2]).unwrap();
+                    assert_eq!(table_name_start, table_name_end);
+
+                    if table_name.is_none() {
+                        table_name = Some(table_name_start.clone())
+                    }
+                    assert_eq!(table_name, Some(table_name_start));
+
+                    // Update min start key
+                    if min_start_key.is_none() || start_key < min_start_key.unwrap() {
+                        min_start_key = Some(start_key);
+                    }
+
+                    // Update max end key
+                    if max_end_key.is_none() || end_key > max_end_key.unwrap() {
+                        max_end_key = Some(end_key);
+                    }
+                }
+            }
+        }
+
+        // Collect data lines
+        for line in content_lines {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("SCAN ") {
+                scan_data.push(trimmed.to_string());
+            }
+        }
+    }
+
+    // Format scan results
+    let mut scan_output = Vec::new();
+    let table = table_name.unwrap();
+
+    scan_output.push(format!(
+        "SCAN {} {} BEGIN",
+        form_key(&table, min_start_key.unwrap()),
+        form_key(&table, max_end_key.unwrap())
+    ));
+
+    // Sort scan data by key value
+    scan_data.sort_by(|a, b| {
+        let a_parts: Vec<&str> = a.split_whitespace().collect();
+        let b_parts: Vec<&str> = b.split_whitespace().collect();
+
+        if a_parts.is_empty() || b_parts.is_empty() {
+            return std::cmp::Ordering::Equal;
+        }
+
+        let a_key = a_parts[0];
+        let b_key = b_parts[0];
+
+        let a_result = extract_key(a_key).map(|(_, num)| num);
+        let b_result = extract_key(b_key).map(|(_, num)| num);
+
+        match (a_result, b_result) {
+            (Ok(a_num), Ok(b_num)) => a_num.cmp(&b_num),
+            _ => a_key.cmp(b_key), // Fallback to string comparison
+        }
+    });
+
+    for data_line in scan_data {
+        scan_output.push(format!("  {}", data_line));
+    }
+    scan_output.push("SCAN END".to_string());
+
+    // Add the formatted output
+    if scan_has_err {
+        output.push(format!("{}> {}", op_id, error(scan_output.join("\n"))));
+    } else {
+        output.push(format!("{}> {}", op_id, scan_output.join("\n")));
+    }
+}
+
 /// Formats an error message
-///
-/// Prefixes the message with "ERROR "
 fn error(msg: impl Display) -> String {
     format!("ERROR {msg}")
 }
