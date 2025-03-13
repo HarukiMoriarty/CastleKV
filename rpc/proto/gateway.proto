@@ -10,6 +10,7 @@ service Db {
   // connects to another server to execute a plan. The sending server
   // acts like a client to the receiving server, but it sends a plan
   // instead of a command.
+  // For now we do not support two phase commit.
   // rpc ConnectPeerExecutor(stream Plan) returns (stream CommandResult) {}
 }
 

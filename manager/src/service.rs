@@ -9,12 +9,21 @@ use rpc::manager::{
     RegisterServerResponse,
 };
 
+/// Manager for handling server registration and partition assignment
 pub struct Manager {
+    /// List of server addresses
     server_addresses: Vec<String>,
+    /// Partition assignments for each server
     partition_assignments: Arc<RwLock<HashMap<String, Vec<PartitionInfo>>>>,
 }
 
 impl Manager {
+    /// Create a new Manager instance
+    ///
+    /// # Arguments
+    ///
+    /// * `server_addresses` - List of server addresses
+    /// * `tables` - Map of table names to key space sizes
     pub fn new(server_addresses: Vec<String>, tables: &HashMap<String, u64>) -> Self {
         let manager = Self {
             server_addresses: server_addresses.clone(),
@@ -38,6 +47,11 @@ impl Manager {
         manager
     }
 
+    /// Initialize partition assignments for all tables
+    ///
+    /// # Arguments
+    ///
+    /// * `tables` - Map of table names to key space sizes
     fn initialize_partitions(&self, tables: &HashMap<String, u64>) {
         let server_count = self.server_addresses.len();
         let mut assignments = self.partition_assignments.write().unwrap();
@@ -85,6 +99,7 @@ impl Manager {
 
 #[tonic::async_trait]
 impl ManagerService for Manager {
+    /// Handle server registration requests
     async fn register_server(
         &self,
         request: Request<RegisterServerRequest>,
@@ -96,12 +111,7 @@ impl ManagerService for Manager {
 
         match assignments.get(&server_address) {
             Some(server_partitions) => {
-                // Filter partitions to only include requested tables (if specified)
-                let mut assigned_partitions = Vec::new();
-
-                for partition in server_partitions {
-                    assigned_partitions.push(partition.clone());
-                }
+                let assigned_partitions = server_partitions.clone();
 
                 info!(
                     "Server {} registered with {} table partitions",
@@ -125,6 +135,7 @@ impl ManagerService for Manager {
         }
     }
 
+    /// Handle requests for the complete partition map
     async fn get_partition_map(
         &self,
         _request: Request<GetPartitionMapRequest>,
@@ -144,10 +155,16 @@ impl ManagerService for Manager {
     }
 }
 
+/// Run the manager service
+///
+/// # Arguments
+///
+/// * `addr` - Address to listen on
+/// * `manager` - Manager instance
 pub async fn run_manager(addr: String, manager: Manager) -> Result<(), Box<dyn std::error::Error>> {
     let addr = addr.parse()?;
 
-    info!("Start manager on {}", addr);
+    info!("Starting manager service on {}", addr);
 
     Server::builder()
         .add_service(ManagerServiceServer::new(manager))
