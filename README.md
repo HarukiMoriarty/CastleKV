@@ -2,7 +2,9 @@
 
 ## Overview
 
-This project implements a distributed key-value store for CS739 Distributed Systems at UW Madison. It provides a scalable, partition-based architecture with support for basic key-value operations.
+This project implements a distributed key-value store for CS739 Distributed Systems at UW Madison. 
+
+It provides a scalable, partition-based architecture with support for basic key-value operations across multiple tables. The system features one-shot ACID transaction properties and is currently being extended to implement Raft consensus protocol for fault-tolerant replicas.
 
 ## Architecture
 
@@ -12,22 +14,22 @@ This project implements a distributed key-value store for CS739 Distributed Syst
 
 The key-value store supports the following operations:
 
-- `PUT <keyabc> <valueabc>`: Store a value for a given key
-    - `PUT <keyabc> found`: Key already exists, value updated
-    - `PUT <keyabc> not_found`: New key created
+- `PUT <key> <value>`: Store a value for a given key
+  - `PUT <key> found`: Key already exists, value updated
+  - `PUT <key> not_found`: New key created
 - `GET <key>`: Retrieve a value for a given key
-    - `GET <keyabc> <valuexyz>`: Success, returns value
-    - `GET <keyabc> null`: Key not found
+  - `GET <key> <value>`: Success, returns value
+  - `GET <key> null`: Key not found
 - `SWAP <key> <new_value>`: Replace an existing value
-    - `SWAP <keyabc> <old_valuexyz>`: Success, returns old value
-    - `SWAP <keyabc> null`: Key not found
+  - `SWAP <key> <old_value>`: Success, returns old value
+  - `SWAP <key> null`: Key not found
 - `DELETE <key>`: Remove a key-value pair
-    - `DELETE <keyabc> found`: Success, key deleted
-    - `DELETE <keyabc> not_found`: Key doesn't exist
+  - `DELETE <key> found`: Success, key deleted
+  - `DELETE <key> not_found`: Key doesn't exist
 - `SCAN <start_key> <end_key>`: Retrieve keys and values within a range
 - `STOP`: Gracefully terminate the client
 
-NOTICE: we only support key with type `u64` or prefix with `usertable_user`.
+**Key Format**: Keys are formatted as `table_name` followed by a numeric identifier (e.g., `customers123`, `products456`). Each table is independently partitioned across servers.
 
 ## Getting Started
 
@@ -57,8 +59,8 @@ cargo run --release --bin manager -- [OPTIONS]
 #### Manager Parameters
 
 - `--listen-addr <LISTEN_ADDR>`  The address to listen on [default: 0.0.0.0:24000]
-- `--servers <SERVERS>`          The server list
-- `--key-num <KEY_NUM>`          Total key number support in KV-store [default: 1000000]
+- `--servers <SERVERS>`          Comma-separated list of server addresses
+- `--tables <TABLES>`            Table configurations in format: table1=1000000,table2=2000000
 
 ### Running the Client (Terminal Interaction)
 
@@ -90,10 +92,10 @@ The client provides an interactive terminal where you can:
 4. Toggle timing with `time`
 5. Clear the screen with `clear`
 6. Exit with `exit` or `quit`
-
-
+ 
 ## TODO List
 
 - [x] Implement log manager
-- [ ] Add support for replicas (Rafe)
-- [ ] Implement server recovery from log
+- [x] Add multi-table support with independent partitioning
+- [ ] Add support for replicas (Raft)
+- [x] Implement server recovery from log
