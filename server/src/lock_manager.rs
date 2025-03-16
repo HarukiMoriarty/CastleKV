@@ -381,7 +381,6 @@ impl LockManager {
                                 );
                                 all_aborted_cmds.extend(aborted_cmds);
                                 all_acquired = false;
-                                break;
                             }
                         }
                     }
