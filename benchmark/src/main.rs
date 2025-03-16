@@ -16,6 +16,14 @@ struct Cli {
         help = "The address to connect to."
     )]
     connect_addr: String,
+
+    #[arg(
+        long,
+        short,
+        default_value = "ycsb",
+        help = "Type of the benchmark"
+    )]
+    benchmark_type: String,
 }
 
 #[tokio::main]
@@ -180,7 +188,12 @@ fn handle_scan_results(cmd_results: &[CommandResult]) -> Result<String, String> 
     let mut min_start_key = None;
     let mut max_end_key = None;
     let mut scan_entries = Vec::new();
-    let table_name = "usertable_user".to_string(); // Hardcoded for YCSB
+    let cli = Cli::parse();
+    let table_name = match cli.benchmark_type.as_str() {
+        "ycsb" => "usertable_user".to_string(),
+        "fuzz" => "key".to_string(),
+        _ => "usertable_user".to_string(),
+    };
 
     // Process all results to find boundaries and collect entries
     for result in cmd_results {

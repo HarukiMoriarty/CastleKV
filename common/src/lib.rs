@@ -4,6 +4,9 @@ mod session;
 pub use id::{CommandId, NodeId};
 pub use session::Session;
 
+/// Length of the key in the key table
+pub const KEY_LEN: usize = 8;
+
 /// Initialize tracing with the default environment filter
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -47,7 +50,11 @@ pub fn extract_key(key: &str) -> Result<(String, u64), String> {
 
 /// Form a composite key from table name and number
 pub fn form_key(table_name: &String, num: u64) -> String {
-    format!("{}{}", table_name, num)
+    if table_name == "key" {
+        format!("key{:0w$}", num, w = KEY_LEN - 3)
+    } else {
+        format!("{}{}", table_name, num)
+    }
 }
 
 /// Set the default RUST_LOG environment variable if not already set
