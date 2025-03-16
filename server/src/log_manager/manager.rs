@@ -101,7 +101,7 @@ impl LogManager {
                         index,
                         command: LogCommand { cmd_id, ops },
                     };
-                    info!("Appending log entry: {:?}", entry);
+                    debug!("Appending log entry: {:?}", entry);
 
                     // Try to append the log entry with retries if it fails
                     let mut success = false;
