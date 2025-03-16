@@ -145,18 +145,19 @@ fn handle_single_command_result(cmd_result: &CommandResult) -> Result<String, St
         });
     }
 
-    // Ensure we have exactly one operation result
-    if cmd_result.ops.len() != 1 {
-        return Err(format!(
-            "Expected 1 operation result, got {}",
-            cmd_result.ops.len()
-        ));
-    }
-
     // Return result based on command status
     match cmd_result.status() {
         Status::Aborted => Ok("Aborted".to_string()),
-        Status::Committed => Ok(cmd_result.ops[0].content.to_owned()),
+        Status::Committed => {
+            // Ensure we have exactly one operation result
+            if cmd_result.ops.len() != 1 {
+                return Err(format!(
+                    "Expected 1 operation result, got {}",
+                    cmd_result.ops.len()
+                ));
+            }
+            Ok(cmd_result.ops[0].content.to_owned())
+        }
     }
 }
 
