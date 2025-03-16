@@ -37,6 +37,9 @@ pub struct ServerConfig {
 
     /// Partition information mapping table names to (start, end) partition key ranges
     pub partition_info: HashMap<String, (u64, u64)>,
+
+    /// Entry size of each log segment
+    pub log_seg_entry_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -52,6 +55,7 @@ impl Default for ServerConfig {
             batch_timeout_ms: None,
             table_name: HashSet::new(),
             partition_info: HashMap::new(),
+            log_seg_entry_size: 1024 * 1024,
         }
     }
 }
@@ -143,6 +147,12 @@ impl ServerConfigBuilder {
     /// Add partition information for a table
     pub fn add_partition(mut self, table: impl Into<String>, range: (u64, u64)) -> Self {
         self.config.partition_info.insert(table.into(), range);
+        self
+    }
+
+    /// Set the entry size of each log segment
+    pub fn log_seg_entry_size(mut self, size: usize) -> Self {
+        self.config.log_seg_entry_size = size;
         self
     }
 

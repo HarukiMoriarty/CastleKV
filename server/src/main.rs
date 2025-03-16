@@ -39,6 +39,9 @@ struct Cli {
         help = "Timeout in milliseconds before a batch is flushed even if not full"
     )]
     batch_timeout: Option<u64>,
+
+    #[arg(long, default_value_t = 1024 * 1024, help = "Entry size of each log segment")]
+    log_seg_entry_size: usize,
 }
 
 impl Cli {
@@ -90,6 +93,7 @@ impl From<Cli> for ServerConfig {
             .persistence_enabled(cli.persistence)
             .batch_size(cli.batch_size)
             .batch_timeout_ms(cli.batch_timeout)
+            .log_seg_entry_size(cli.log_seg_entry_size)
             .build()
     }
 }
