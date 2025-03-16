@@ -363,6 +363,12 @@ impl LockManager {
                                 aborted_cmds,
                             } => {
                                 debug!("Acquired lock on {key:?}: other owners {other_owners:?}, aborted cmds {aborted_cmds:?}");
+
+                                self.cmd_acquired_keys
+                                    .entry(cmd_id)
+                                    .or_default()
+                                    .insert(key.clone());
+
                                 acquired_keys.push(key.clone());
                                 all_aborted_cmds.extend(aborted_cmds);
 
@@ -392,12 +398,6 @@ impl LockManager {
 
                     // Handle result for the requesting command
                     if all_acquired {
-                        // Track acquired locks
-                        let cmd_acquired_keys = self.cmd_acquired_keys.entry(cmd_id).or_default();
-                        for key in acquired_keys {
-                            cmd_acquired_keys.insert(key);
-                        }
-
                         debug!("Command {cmd_id:?} acquired all requested locks");
                         let _ = resp_tx.send(true);
                     } else {

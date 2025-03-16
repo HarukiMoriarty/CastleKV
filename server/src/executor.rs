@@ -179,6 +179,8 @@ impl Executor {
                                         warn!("Client disconnected");
                                         break;
                                     }
+
+                                    debug!("Send result back to client");
                                 }
                                 Err(e) => {
                                     warn!("Error receiving command: {}", e);
