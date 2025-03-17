@@ -206,7 +206,6 @@ fn handle_scan_results(
     let mut max_end_key = None;
     let mut table_name = None;
     let mut scan_entries = Vec::new();
-    let cli = Cli::parse();
 
     // Process all results to find boundaries and collect entries
     for result in cmd_results {
