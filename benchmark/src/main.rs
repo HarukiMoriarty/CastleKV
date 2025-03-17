@@ -290,6 +290,18 @@ fn handle_scan_results(
         }
     });
 
+    // Format keys using key_len if provided
+    if let Some(key_len) = key_len {
+        for entry in &mut scan_entries {
+            let parts: Vec<&str> = entry.split_whitespace().collect();
+            let key = parts[0];
+            let (_, num) = extract_key(key).unwrap();
+            let formatted_key = form_key(&table, num, Some(key_len));
+            // Replace the original key with the formatted one
+            *entry = entry.replacen(key, &formatted_key, 1);
+        }
+    }
+
     // Add sorted entries to result
     for entry in scan_entries {
         scan_result.push(entry);
