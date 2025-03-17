@@ -6,7 +6,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use super::{extract_key, form_key, metadata, CommandId};
 use rpc::gateway::db_client::DbClient;
@@ -203,8 +203,8 @@ impl Session {
 
     /// Helper method to add a scan operation
     fn add_scan_operation(&mut self, args: &[String]) -> Result<()> {
-        let (start_table, start_key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
-        let (end_table, end_key) = extract_key(&args[1]).map_err(|e| anyhow::anyhow!(e))?;
+        let (start_table, mut start_key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
+        let (end_table, mut end_key) = extract_key(&args[1]).map_err(|e| anyhow::anyhow!(e))?;
 
         // Validate scan parameters
         if start_table != end_table {
@@ -212,7 +212,8 @@ impl Session {
         }
 
         if start_key > end_key {
-            bail!("Invalid scan range: start key must be less than or equal to end key");
+            trace!("start_key > end_key, swapping");
+            std::mem::swap(&mut start_key, &mut end_key);
         }
 
         let table_name = start_table;
