@@ -134,7 +134,11 @@ fn handle_result(
                 return Err("No command results returned".to_string());
             }
 
-            let is_scan = cmd_results[0].content.trim_start().starts_with("SCAN ");
+            let is_scan = !cmd_results[0].ops.is_empty()
+                && cmd_results[0].ops[0]
+                    .content
+                    .trim_start()
+                    .starts_with("SCAN ");
 
             // Handle single-command results (GET, PUT, SWAP, DELETE)
             if !is_scan {
