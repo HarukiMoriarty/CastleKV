@@ -134,8 +134,10 @@ fn handle_result(
                 return Err("No command results returned".to_string());
             }
 
+            let is_scan = cmd_results[0].content.trim_start().starts_with("SCAN ");
+
             // Handle single-command results (GET, PUT, SWAP, DELETE)
-            if cmd_results.len() == 1 {
+            if !is_scan {
                 handle_single_command_result(&cmd_results[0])
             }
             // Handle multi-command results (SCAN across partitions)
