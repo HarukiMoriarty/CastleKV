@@ -237,7 +237,7 @@ impl KeyValueDb {
             // Only lock this specific table for reading
             let table = table_lock.read().unwrap();
             for (key_num, value) in table.range(start_key..=end_key) {
-                let key_str = form_key(&table_name, *key_num);
+                let key_str = form_key(&table_name, *key_num, None);
                 result.push_str(&format!("\n  {} {}", key_str, value));
             }
         } else {

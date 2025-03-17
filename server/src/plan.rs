@@ -244,7 +244,7 @@ impl Plan {
 
                         if let Ok((table_name, start_num, end_num)) = result {
                             for num in start_num..=end_num {
-                                let key = form_key(&table_name, num);
+                                let key = form_key(&table_name, num, None);
                                 if !write_set.contains(&key) {
                                     read_set.insert(key);
                                 }

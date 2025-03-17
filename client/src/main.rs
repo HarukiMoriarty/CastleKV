@@ -18,6 +18,9 @@ struct Cli {
         help = "The address to connect to."
     )]
     connect_addr: String,
+
+    #[arg(long, short, help = "Key length, enable if key length is fixed")]
+    key_len: Option<usize>,
 }
 
 #[tokio::main(worker_threads = 1)]
@@ -50,8 +53,8 @@ async fn main() -> anyhow::Result<()> {
                 // Process commands based on the first token
                 let output = match tokens[0].to_lowercase().as_str() {
                     "cmd" => handle_cmd(&mut session, &tokens),
-                    "op" => handle_op(&mut session, &mut tokens).await,
-                    "done" => handle_done(&mut session, &tokens).await,
+                    "op" => handle_op(&mut session, &mut tokens, cli.key_len).await,
+                    "done" => handle_done(&mut session, &tokens, cli.key_len).await,
                     "time" => {
                         measure_time = !measure_time;
                         format!("TIME: {measure_time}")
@@ -182,7 +185,7 @@ fn handle_cmd(session: &mut Session, _tokens: &[String]) -> String {
 /// Add an operation to the current command
 ///
 /// If no command is in progress, creates a new one and executes it immediately.
-async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
+async fn handle_op(session: &mut Session, tokens: &mut [String], key_len: Option<usize>) -> String {
     // Validate operation arguments
     if tokens.len() < 2 {
         return error("operation name required");
@@ -232,28 +235,28 @@ async fn handle_op(session: &mut Session, tokens: &mut [String]) -> String {
     let next_op_id = session.get_next_op_id().unwrap();
 
     // Add the operation to the command
-    if let Err(e) = session.add_operation(&tokens[1].to_uppercase(), &tokens[2..]) {
+    if let Err(e) = session.add_operation(&tokens[1].to_uppercase(), &tokens[2..], key_len) {
         return error(e);
     }
 
     // Execute immediately if this wasn't part of a multi-operation command
     if execute_immediately {
-        format_result(session.finish_command().await)
+        format_result(session.finish_command().await, key_len)
     } else {
         format!("OP {}", next_op_id)
     }
 }
 
 /// Finish and execute the current command
-async fn handle_done(session: &mut Session, tokens: &[String]) -> String {
+async fn handle_done(session: &mut Session, tokens: &[String], key_len: Option<usize>) -> String {
     if tokens.len() != 1 {
         return error("DONE command takes no arguments");
     }
-    format_result(session.finish_command().await)
+    format_result(session.finish_command().await, key_len)
 }
 
 /// Formats the results of a command execution for display
-fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
+fn format_result(result: anyhow::Result<Vec<CommandResult>>, key_len: Option<usize>) -> String {
     result.map_or_else(error, |cmd_results| {
         let mut output = Vec::new();
 
@@ -283,7 +286,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
             let is_scan = first_result.content.trim_start().starts_with("SCAN ");
 
             if is_scan {
-                format_scan_results(*op_id, results, &mut output);
+                format_scan_results(*op_id, results, &mut output, key_len);
             } else {
                 // Regular operation (should only have one result)
                 if results.len() != 1 {
@@ -320,7 +323,12 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>) -> String {
 }
 
 /// Format scan results from potentially multiple partitions
-fn format_scan_results(op_id: u32, results: &[OperationResult], output: &mut Vec<String>) {
+fn format_scan_results(
+    op_id: u32,
+    results: &[OperationResult],
+    output: &mut Vec<String>,
+    key_len: Option<usize>,
+) {
     // Find min start key and max end key across all partitions
     let mut min_start_key = None;
     let mut max_end_key = None;
@@ -371,8 +379,8 @@ fn format_scan_results(op_id: u32, results: &[OperationResult], output: &mut Vec
 
     scan_output.push(format!(
         "SCAN {} {} BEGIN",
-        form_key(&table, min_start_key.unwrap()),
-        form_key(&table, max_end_key.unwrap())
+        form_key(&table, min_start_key.unwrap(), key_len),
+        form_key(&table, max_end_key.unwrap(), key_len)
     ));
 
     // Sort scan data by key value

@@ -4,9 +4,6 @@ mod session;
 pub use id::{CommandId, NodeId};
 pub use session::Session;
 
-/// Length of the key in the key table
-pub const KEY_LEN: usize = 8;
-
 /// Initialize tracing with the default environment filter
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -49,9 +46,15 @@ pub fn extract_key(key: &str) -> Result<(String, u64), String> {
 }
 
 /// Form a composite key from table name and number
-pub fn form_key(table_name: &String, num: u64) -> String {
-    if table_name == "key" {
-        format!("key{:0w$}", num, w = KEY_LEN - 3)
+///
+/// # Arguments
+/// * `table_name` - The name of the table
+/// * `num` - The numeric part of the key
+/// * `key_len` - Optional total key length for padding
+pub fn form_key(table_name: &String, num: u64, key_len: Option<usize>) -> String {
+    if let Some(len) = key_len {
+        let padding_width = len.saturating_sub(table_name.len());
+        format!("{}{:0width$}", table_name, num, width = padding_width)
     } else {
         format!("{}{}", table_name, num)
     }

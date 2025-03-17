@@ -138,7 +138,12 @@ impl Session {
     ///
     /// If no existing command builder previously created by [`new_command`](Self::new_command)
     /// exists, returns an error.
-    pub fn add_operation(&mut self, name: &str, args: &[String]) -> Result<&mut Self> {
+    pub fn add_operation(
+        &mut self,
+        name: &str,
+        args: &[String],
+        key_len: Option<usize>,
+    ) -> Result<&mut Self> {
         // Ensure a command is in progress
         if self.cmds.is_none() {
             bail!("No command in progress");
@@ -153,7 +158,7 @@ impl Session {
 
             // Scan operations
             "SCAN" if args.len() >= 2 => {
-                self.add_scan_operation(args)?;
+                self.add_scan_operation(args, key_len)?;
             }
 
             // Unknown or invalid operations
@@ -202,7 +207,7 @@ impl Session {
     }
 
     /// Helper method to add a scan operation
-    fn add_scan_operation(&mut self, args: &[String]) -> Result<()> {
+    fn add_scan_operation(&mut self, args: &[String], key_len: Option<usize>) -> Result<()> {
         let (start_table, mut start_key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
         let (end_table, mut end_key) = extract_key(&args[1]).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -242,8 +247,8 @@ impl Session {
 
                 // Create scan arguments for this partition
                 let scan_args = vec![
-                    form_key(&table_name, effective_start),
-                    form_key(&table_name, effective_end),
+                    form_key(&table_name, effective_start, key_len),
+                    form_key(&table_name, effective_end, key_len),
                 ];
 
                 let op = Operation {

@@ -17,13 +17,8 @@ struct Cli {
     )]
     connect_addr: String,
 
-    #[arg(
-        long,
-        short,
-        default_value = "ycsb",
-        help = "Type of the benchmark"
-    )]
-    benchmark_type: String,
+    #[arg(long, short, help = "Key length, enable if key length is fixed")]
+    key_len: Option<usize>,
 }
 
 #[tokio::main]
@@ -56,8 +51,13 @@ async fn main() -> anyhow::Result<()> {
                     error!("PUT/SCAN/SWAP requires 2 arguments: <key> <value>");
                     continue;
                 }
-                let output =
-                    execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..]).await;
+                let output = execute_command(
+                    &mut session,
+                    &tokens[0].to_uppercase(),
+                    &tokens[1..],
+                    cli.key_len,
+                )
+                .await;
                 println!("{}", output);
             }
             "GET" | "DELETE" => {
@@ -65,8 +65,13 @@ async fn main() -> anyhow::Result<()> {
                     error!("{} requires 1 argument: <key>", tokens[0].to_uppercase());
                     continue;
                 }
-                let output =
-                    execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..]).await;
+                let output = execute_command(
+                    &mut session,
+                    &tokens[0].to_uppercase(),
+                    &tokens[1..],
+                    cli.key_len,
+                )
+                .await;
                 println!("{}", output);
             }
             "STOP" => {
@@ -88,16 +93,21 @@ fn tokenize(line: &str) -> Vec<String> {
 }
 
 /// Execute a command with retry logic
-async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> String {
+async fn execute_command(
+    session: &mut Session,
+    cmd: &str,
+    args: &[String],
+    key_len: Option<usize>,
+) -> String {
     const MAX_RETRIES: u32 = 10;
     let mut retries = 0;
 
     loop {
         // Create a new command and execute it
         session.new_command().unwrap();
-        session.add_operation(cmd, args).unwrap();
+        session.add_operation(cmd, args, key_len).unwrap();
 
-        match handle_result(session.finish_command().await) {
+        match handle_result(session.finish_command().await, key_len) {
             Ok(output) if output == "Aborted" && retries < MAX_RETRIES => {
                 retries += 1;
                 // Silently retry aborted commands
@@ -113,7 +123,10 @@ async fn execute_command(session: &mut Session, cmd: &str, args: &[String]) -> S
 }
 
 /// Process command results and format the output
-fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, String> {
+fn handle_result(
+    result: anyhow::Result<Vec<CommandResult>>,
+    key_len: Option<usize>,
+) -> Result<String, String> {
     match result {
         Ok(cmd_results) => {
             // Ensure we have at least one result
@@ -127,7 +140,7 @@ fn handle_result(result: anyhow::Result<Vec<CommandResult>>) -> Result<String, S
             }
             // Handle multi-command results (SCAN across partitions)
             else {
-                handle_scan_results(&cmd_results)
+                handle_scan_results(&cmd_results, key_len)
             }
         }
         Err(e) => Err(error(e)),
@@ -162,7 +175,10 @@ fn handle_single_command_result(cmd_result: &CommandResult) -> Result<String, St
 }
 
 /// Process multi-command results from SCAN operations
-fn handle_scan_results(cmd_results: &[CommandResult]) -> Result<String, String> {
+fn handle_scan_results(
+    cmd_results: &[CommandResult],
+    key_len: Option<usize>,
+) -> Result<String, String> {
     // Check for errors in any of the results
     let has_err = cmd_results.iter().any(|res| res.has_err);
     if has_err {
@@ -188,13 +204,9 @@ fn handle_scan_results(cmd_results: &[CommandResult]) -> Result<String, String> 
     // Process SCAN operation results
     let mut min_start_key = None;
     let mut max_end_key = None;
+    let mut table_name = None;
     let mut scan_entries = Vec::new();
     let cli = Cli::parse();
-    let table_name = match cli.benchmark_type.as_str() {
-        "ycsb" => "usertable_user".to_string(),
-        "fuzz" => "key".to_string(),
-        _ => "usertable_user".to_string(),
-    };
 
     // Process all results to find boundaries and collect entries
     for result in cmd_results {
@@ -216,16 +228,23 @@ fn handle_scan_results(cmd_results: &[CommandResult]) -> Result<String, String> 
         if lines[0].trim().starts_with("SCAN ") {
             let parts: Vec<&str> = lines[0].split_whitespace().collect();
             if parts.len() >= 3 {
-                if let Ok((_, start_key)) = extract_key(parts[1]) {
-                    if min_start_key.is_none() || start_key < min_start_key.unwrap() {
-                        min_start_key = Some(start_key);
-                    }
+                let (table_name_start, start_key) = extract_key(parts[1]).unwrap();
+                let (table_name_end, end_key) = extract_key(parts[2]).unwrap();
+                assert_eq!(table_name_start, table_name_end);
+
+                if table_name.is_none() {
+                    table_name = Some(table_name_start.clone())
+                }
+                assert_eq!(table_name, Some(table_name_start));
+
+                // Update min start key
+                if min_start_key.is_none() || start_key < min_start_key.unwrap() {
+                    min_start_key = Some(start_key);
                 }
 
-                if let Ok((_, end_key)) = extract_key(parts[2]) {
-                    if max_end_key.is_none() || end_key > max_end_key.unwrap() {
-                        max_end_key = Some(end_key);
-                    }
+                // Update max end key
+                if max_end_key.is_none() || end_key > max_end_key.unwrap() {
+                    max_end_key = Some(end_key);
                 }
             }
         }
@@ -246,10 +265,11 @@ fn handle_scan_results(cmd_results: &[CommandResult]) -> Result<String, String> 
 
     // Format the combined scan result
     let mut scan_result = Vec::new();
+    let table = table_name.unwrap();
     scan_result.push(format!(
         "SCAN {} {} BEGIN",
-        form_key(&table_name, min_start_key.unwrap()),
-        form_key(&table_name, max_end_key.unwrap())
+        form_key(&table, min_start_key.unwrap(), key_len),
+        form_key(&table, max_end_key.unwrap(), key_len)
     ));
 
     // Sort entries by key
