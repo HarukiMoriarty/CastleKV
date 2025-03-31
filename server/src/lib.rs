@@ -141,6 +141,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
         log_manager_rx,
         db.clone(),
         config.log_seg_entry_size,
+        config.peer_listen_addr.clone(),
     );
     tokio::spawn(log_manager.run());
     info!("Started log manager service");

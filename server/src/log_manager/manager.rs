@@ -7,10 +7,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::database::KeyValueDb;
 use crate::log_manager::comm::LogManagerMessage;
+use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::storage::RaftLog;
 use crate::plan::Plan;
 use rpc::gateway::Command;
-use rpc::raft::LogEntry;
+use rpc::raft::{raft_server::RaftServer, LogEntry};
 
 /// Represents the possible states of a node in the Raft
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,7 @@ impl LogManager {
         rx: UnboundedReceiver<LogManagerMessage>,
         db: Arc<KeyValueDb>,
         max_segment_size: usize,
+        raft_listen_addr: String,
     ) -> Self {
         let path_str = log_path
             .as_ref()
@@ -126,6 +128,18 @@ impl LogManager {
                 }
             }
         }
+
+        // Start raft server
+        let (raft_tx, raft_rx) = tokio::sync::mpsc::unbounded_channel::<RaftRequest>();
+        let raft_service = RaftService::new(raft_tx);
+        tokio::spawn(async move {
+            info!("Starting Raft server at {}", raft_listen_addr);
+            tonic::transport::Server::builder()
+                .add_service(RaftServer::new(raft_service))
+                .serve(raft_listen_addr.parse().unwrap())
+                .await
+                .unwrap();
+        });
 
         LogManager { log, rx, db }
     }
