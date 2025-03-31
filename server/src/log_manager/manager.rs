@@ -32,18 +32,19 @@ pub struct LogManager {
     /// Reference to the key-value database
     db: Arc<KeyValueDb>,
     // /// Unique identifier for this node
-    // node_id: String,
+    // node_id: u32,
     // /// Map of peer nodes (node_id -> network address)
-    // peers: HashMap<String, String>,
+    // peers: HashMap<u32, String>,
 
     // /// Current state in the Raft consensus algorithm (Leader/Follower/Candidate)
     // current_state: NodeState,
     // /// Current term number (monotonically increasing)
     // current_term: u64,
     // /// Node ID this node voted for in the current term (if any)
-    // voted_for: Option<String>,
+    // voted_for: Option<u32>,
+
     // /// Current leader's node ID (if known)
-    // leader_id: Option<String>,
+    // leader_id: Option<u32>,
     // /// Current leader's network address (if known)
     // leader_addr: Option<String>,
 

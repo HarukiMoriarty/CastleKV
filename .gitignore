@@ -1,4 +1,4 @@
 target
 *.txt
 data
-raft_*
+raft_log*

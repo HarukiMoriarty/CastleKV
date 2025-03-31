@@ -4,7 +4,7 @@ package raft;
 
 import "gateway.proto";
 
-service RaftConsensus {
+service Raft {
   // AppendEntries RPC - used for log replication and heartbeats
   rpc AppendEntries(stream AppendEntriesRequest) returns (stream AppendEntriesResponse) {}
   
@@ -14,7 +14,8 @@ service RaftConsensus {
 
 // AppendEntries RPC request
 message AppendEntriesRequest {
-  string leader_id = 1;
+  // leader id is also the sender id
+  uint32 leader_id = 1;
   uint64 term = 2;
   uint64 prev_log_index = 3;
   uint64 prev_log_term = 4;
@@ -30,7 +31,7 @@ message AppendEntriesResponse {
 
 // RequestVote RPC request
 message RequestVoteRequest {
-  string candidate_id = 1;
+  uint32 candidate_id = 1;
   uint64 term = 2;
   uint64 last_log_index = 3;
   uint64 last_log_term = 4;
