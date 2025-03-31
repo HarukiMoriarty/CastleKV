@@ -12,6 +12,7 @@ use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
 use crate::log_manager::{LogManagerMessage, LogManagerSender};
 use crate::plan::Plan;
 use common::CommandId;
+use rpc::gateway::Operation;
 
 pub type ExecutorSender = mpsc::UnboundedSender<ExecutorMessage>;
 type ExecutorReceiver = mpsc::UnboundedReceiver<ExecutorMessage>;
@@ -68,7 +69,7 @@ impl Executor {
                         let mut stream = stream;
                         while let Some(command) = stream.next().await {
                             match command {
-                                Ok(cmd) => {
+                                Ok(mut cmd) => {
                                     debug!("Command details: {:?}", cmd);
 
                                     // Generate unique monotonical increasing command id
@@ -76,10 +77,12 @@ impl Executor {
                                         self.config.node_id,
                                         cmd_cnt.fetch_add(1, Ordering::SeqCst),
                                     );
+                                    // Set cmd id
+                                    cmd.cmd_id = cmd_id.into();
 
                                     // Generate Plan (validation)
                                     let mut plan =
-                                        match Plan::from_command(&cmd, cmd_id, &partition_info) {
+                                        match Plan::from_client_command(&cmd, &partition_info) {
                                             Err(err) => {
                                                 debug!("Command validation failed: {}", err);
 
@@ -195,20 +198,15 @@ impl Executor {
     }
 
     async fn append_raft_log(plan: &mut Plan, log_manager_tx: &LogManagerSender) {
-        let mut log_ops: Vec<(String, String)> = Vec::new();
+        let mut log_ops: Vec<Operation> = Vec::new();
         let (log_resp_tx, log_resp_rx) = oneshot::channel::<u64>();
 
         for op in plan.ops.iter() {
             let op_name = op.name.clone();
-            let op_args = op.args.clone();
 
-            if op_name == "PUT" || op_name == "SWAP" {
-                let key = op_args[0].clone();
-                let value = op_args[1].clone();
-                log_ops.push((key, value));
-            } else if op_name == "DELETE" {
-                let key = op_args[0].clone();
-                log_ops.push((key, "NULL".to_string()));
+            // Only log operations that modify state
+            if op_name == "PUT" || op_name == "SWAP" || op_name == "DELETE" {
+                log_ops.push(op.clone());
             }
             // Other operations like GET or SCAN don't need to be logged
         }

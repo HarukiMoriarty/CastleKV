@@ -1,21 +1,71 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, error, info, warn};
 
 use crate::database::KeyValueDb;
-use crate::log_manager::comm::{LogCommand, LogEntry, LogManagerMessage};
+use crate::log_manager::comm::LogManagerMessage;
 use crate::log_manager::storage::RaftLog;
 use crate::plan::Plan;
+use rpc::gateway::Command;
+use rpc::raft::LogEntry;
 
-/// Manager for Raft log operations
+/// Represents the possible states of a node in the Raft
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeState {
+    /// Follower state - receives log entries from leader and votes in elections
+    Follower,
+    /// Candidate state - requests votes from peers during election
+    Candidate,
+    /// Leader state - handles client requests and replicates log entries to followers
+    Leader,
+}
+
+/// Manager for Raft log operations and consensus
 pub struct LogManager {
     /// Underlying Raft log implementation
     log: RaftLog,
-    /// Receiver for log manager messages
+    /// Receiver for log manager messages from clients
     rx: UnboundedReceiver<LogManagerMessage>,
     /// Reference to the key-value database
     db: Arc<KeyValueDb>,
+    // /// Unique identifier for this node
+    // node_id: String,
+    // /// Map of peer nodes (node_id -> network address)
+    // peers: HashMap<String, String>,
+
+    // /// Current state in the Raft consensus algorithm (Leader/Follower/Candidate)
+    // current_state: NodeState,
+    // /// Current term number (monotonically increasing)
+    // current_term: u64,
+    // /// Node ID this node voted for in the current term (if any)
+    // voted_for: Option<String>,
+    // /// Current leader's node ID (if known)
+    // leader_id: Option<String>,
+    // /// Current leader's network address (if known)
+    // leader_addr: Option<String>,
+
+    // /// Highest log entry known to be committed
+    // commit_index: u64,
+    // /// Highest log entry applied to state machine
+    // last_applied: u64,
+
+    // /// For each peer, index of the next log entry to send (leader only)
+    // next_index: HashMap<String, u64>,
+    // /// For each peer, index of highest log entry known to be replicated (leader only)
+    // match_index: HashMap<String, u64>,
+
+    // /// Timestamp of last received heartbeat
+    // last_heartbeat: Instant,
+    // /// Randomized election timeout duration
+    // election_timeout: Duration,
+
+    // /// Map of channels to send RPC messages to peers (node_id -> sender)
+    // rpc_tx: HashMap<String, UnboundedSender<RaftRpcMessage>>,
+    // /// Receiver for incoming RPC messages from peers
+    // rpc_rx: UnboundedReceiver<RaftRpcMessage>,
 }
 
 impl LogManager {
@@ -66,7 +116,7 @@ impl LogManager {
         for entry in entries {
             debug!("Applying log entry: {:?}", entry);
 
-            match Plan::from_log_entry(entry) {
+            match Plan::from_log_command(&entry.command.unwrap()) {
                 Ok(plan) => {
                     db.execute(&plan);
                 }
@@ -99,7 +149,10 @@ impl LogManager {
                     let entry = LogEntry {
                         term,
                         index,
-                        command: LogCommand { cmd_id, ops },
+                        command: Some(Command {
+                            cmd_id: cmd_id.into(),
+                            ops,
+                        }),
                     };
                     debug!("Appending log entry: {:?}", entry);
 

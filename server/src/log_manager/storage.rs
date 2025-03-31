@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use tracing::debug;
 
-use crate::log_manager::comm::LogEntry;
+use rpc::raft::LogEntry;
 
 /// A single log segment file
 pub(crate) struct Segment {

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::log_manager::LogEntry;
 use common::{extract_key, form_key, CommandId};
 use rpc::gateway::{Command, Operation};
 
@@ -32,49 +31,35 @@ impl Plan {
     /// # Arguments
     ///
     /// * `cmd` - The command to convert to a plan
-    /// * `cmd_id` - Command identifier
     /// * `partition_info` - Partition information for tables
-    pub(crate) fn from_command(
+    pub(crate) fn from_client_command(
         cmd: &Command,
-        cmd_id: CommandId,
         partition_info: &HashMap<String, (u64, u64)>,
     ) -> Result<Plan, String> {
+        assert_ne!(CommandId::INVALID, cmd.cmd_id.into());
         Self::validate_command(cmd, partition_info)?;
 
         Ok(Plan {
-            cmd_id,
+            cmd_id: cmd.cmd_id.into(),
             log_entry_index: None,
             ops: cmd.ops.clone(),
             rw_set: Self::calculate_rw_set(&cmd.ops),
         })
     }
 
-    /// Create a plan from a log entry (follower / recovery)
+    /// Create a plan from a log entry command (follower)
     ///
     /// # Arguments
     ///
-    /// * `log_entry` - The log entry to convert to a plan
-    pub(crate) fn from_log_entry(log_entry: LogEntry) -> Result<Plan, String> {
-        let mut ops = Vec::with_capacity(log_entry.command.ops.len());
-
-        for (index, op) in log_entry.command.ops.into_iter().enumerate() {
-            let (name, args) = match op.1.as_str() {
-                "NULL" => ("DELETE".to_string(), vec![op.0]),
-                _ => ("PUT".to_string(), vec![op.0, op.1]),
-            };
-
-            ops.push(Operation {
-                id: index as u32,
-                name,
-                args,
-            });
-        }
-
+    /// * `cmd` - The command to convert to a plan
+    /// * `partition_info` - Partition information for tables
+    pub(crate) fn from_log_command(cmd: &Command) -> Result<Plan, String> {
+        assert_ne!(CommandId::INVALID, cmd.cmd_id.into());
         Ok(Plan {
-            cmd_id: 0.into(),
-            log_entry_index: Some(log_entry.index),
-            ops,
-            rw_set: RWSet::default(),
+            cmd_id: cmd.cmd_id.into(),
+            log_entry_index: None,
+            ops: cmd.ops.clone(),
+            rw_set: Self::calculate_rw_set(&cmd.ops),
         })
     }
 
