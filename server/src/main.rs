@@ -15,9 +15,17 @@ struct Cli {
         long,
         short,
         default_value = "0.0.0.0:23000",
-        help = "The address to listen on"
+        help = "The address to listen on from client"
     )]
-    listen_addr: String,
+    client_listen_addr: String,
+
+    #[arg(
+        long,
+        short,
+        default_value = "0.0.0.0:25000",
+        help = "The address to listen on from replica peers"
+    )]
+    peer_listen_addr: String,
 
     #[arg(long, short, help = "Directory path for database files")]
     db_path: Option<PathBuf>,
@@ -27,6 +35,9 @@ struct Cli {
 
     #[arg(long, default_value = "0.0.0.0:24000", help = "Address of the manager")]
     manager_addr: String,
+
+    #[arg(long, default_value = "", help = "Addresses of peer replicas")]
+    peer_replica_addr: String,
 
     #[arg(long, default_value_t = false, help = "Enable database persistence")]
     persistence: bool,
@@ -86,10 +97,12 @@ impl From<Cli> for ServerConfig {
     fn from(cli: Cli) -> Self {
         ServerConfig::builder()
             .node_id(cli.node_id)
-            .listen_addr(cli.listen_addr)
+            .client_listen_addr(cli.client_listen_addr)
+            .peer_listen_addr(cli.peer_listen_addr)
             .db_path(cli.db_path)
             .log_path(cli.log_path)
             .manager_addr(cli.manager_addr)
+            .peer_replica_addr(cli.peer_replica_addr)
             .persistence_enabled(cli.persistence)
             .batch_size(cli.batch_size)
             .batch_timeout_ms(cli.batch_timeout)

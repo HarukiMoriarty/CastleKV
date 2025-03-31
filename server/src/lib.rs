@@ -44,7 +44,7 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
 
     // Create a request with server address
     let request = RegisterServerRequest {
-        server_address: config.listen_addr.clone(),
+        server_address: config.client_listen_addr.clone(),
     };
 
     // Register this server with the manager
@@ -57,7 +57,7 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
     if response.has_err {
         return Err(format!(
             "Server address '{}' registration failed",
-            config.listen_addr
+            config.client_listen_addr
         )
         .into());
     }
@@ -136,7 +136,12 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     }
 
     // Start log manager
-    let log_manager = LogManager::new(config.log_path.clone(), log_manager_rx, db.clone(), config.log_seg_entry_size);
+    let log_manager = LogManager::new(
+        config.log_path.clone(),
+        log_manager_rx,
+        db.clone(),
+        config.log_seg_entry_size,
+    );
     tokio::spawn(log_manager.run());
     info!("Started log manager service");
 
@@ -146,7 +151,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     info!("Started lock manager service");
 
     // Start gateway (gRPC server)
-    let addr = config.listen_addr.parse()?;
+    let addr = config.client_listen_addr.parse()?;
     let gateway = GatewayService::new(executor_tx);
 
     info!("Starting gateway server on {}", addr);

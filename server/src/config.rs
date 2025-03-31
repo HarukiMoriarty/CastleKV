@@ -11,8 +11,11 @@ pub struct ServerConfig {
     /// The node id of current server
     pub node_id: NodeId,
 
-    /// The address to listen on
-    pub listen_addr: String,
+    /// The address to listen on from client
+    pub client_listen_addr: String,
+
+    /// The address to listen on from peer replicas
+    pub peer_listen_addr: String,
 
     /// Directory path for database files
     pub db_path: Option<PathBuf>,
@@ -22,6 +25,9 @@ pub struct ServerConfig {
 
     /// Address of the manager node
     pub manager_addr: String,
+
+    /// Address of the peer replicas
+    pub peer_replica_addr: HashMap<u32, String>,
 
     /// Enable database persistence
     pub persistence_enabled: bool,
@@ -46,10 +52,12 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             node_id: NodeId(0),
-            listen_addr: "0.0.0.0:23000".to_string(),
+            client_listen_addr: "0.0.0.0:23000".to_string(),
+            peer_listen_addr: "0.0.0.0:25000".to_string(),
             db_path: None,
             log_path: None,
             manager_addr: "0.0.0.0:24000".to_string(),
+            peer_replica_addr: HashMap::new(),
             persistence_enabled: false,
             batch_size: None,
             batch_timeout_ms: None,
@@ -88,9 +96,15 @@ impl ServerConfigBuilder {
         self
     }
 
-    /// Set the listen address
-    pub fn listen_addr(mut self, addr: impl Into<String>) -> Self {
-        self.config.listen_addr = addr.into();
+    /// Set the client listen address
+    pub fn client_listen_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.client_listen_addr = addr.into();
+        self
+    }
+
+    /// Set the peer replicas listen address
+    pub fn peer_listen_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.peer_listen_addr = addr.into();
         self
     }
 
@@ -109,6 +123,17 @@ impl ServerConfigBuilder {
     /// Set the manager address
     pub fn manager_addr(mut self, addr: impl Into<String>) -> Self {
         self.config.manager_addr = addr.into();
+        self
+    }
+
+    /// Set peer replica addresses
+    pub fn peer_replica_addr(mut self, addrs: impl Into<String>) -> Self {
+        self.config.peer_replica_addr = addrs
+            .into()
+            .split(',')
+            .enumerate()
+            .map(|(i, addr)| ((i + 1) as u32, addr.trim().to_string()))
+            .collect();
         self
     }
 
