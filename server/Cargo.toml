@@ -12,6 +12,7 @@ futures.workspace = true
 clap.workspace = true
 common.workspace = true
 glob.workspace = true
+rand.workspace = true
 rpc.workspace = true
 sled.workspace = true
 serde.workspace = true

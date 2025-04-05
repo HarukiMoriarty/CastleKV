@@ -10,6 +10,9 @@ use rpc::raft::{
     RequestVoteResponse,
 };
 
+type RaftRequestIncomingSender = mpsc::UnboundedSender<RaftRequest>;
+pub type RaftRequestIncomingReceiver = mpsc::UnboundedReceiver<RaftRequest>;
+
 /// Events from RPC server to LogManager
 #[derive(Debug)]
 pub enum RaftRequest {
@@ -27,12 +30,14 @@ pub enum RaftRequest {
 
 pub struct RaftService {
     /// Channel to forward raft request to log manager
-    raft_request_tx: mpsc::UnboundedSender<RaftRequest>,
+    raft_request_incoming_tx: RaftRequestIncomingSender,
 }
 
 impl RaftService {
-    pub fn new(raft_request_tx: mpsc::UnboundedSender<RaftRequest>) -> Self {
-        Self { raft_request_tx }
+    pub fn new(raft_request_incoming_tx: RaftRequestIncomingSender) -> Self {
+        Self {
+            raft_request_incoming_tx,
+        }
     }
 }
 
@@ -50,14 +55,14 @@ impl Raft for RaftService {
     ) -> Result<Response<Self::AppendEntriesStream>, Status> {
         let mut stream = request.into_inner();
         let (resp_tx, resp_rx) = mpsc::unbounded_channel();
-        let raft_request_tx = self.raft_request_tx.clone();
+        let raft_request_incoming_tx = self.raft_request_incoming_tx.clone();
 
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
                 let (oneshot_tx, oneshot_rx) = oneshot::channel();
 
                 // Forward to LogManager
-                if let Err(e) = raft_request_tx.send(RaftRequest::AppendEntriesRequest {
+                if let Err(e) = raft_request_incoming_tx.send(RaftRequest::AppendEntriesRequest {
                     request: req,
                     oneshot_tx,
                 }) {
@@ -96,7 +101,7 @@ impl Raft for RaftService {
     ) -> Result<Response<Self::RequestVoteStream>, Status> {
         let mut stream = request.into_inner();
         let (resp_tx, resp_rx) = mpsc::unbounded_channel();
-        let raft_request_tx = self.raft_request_tx.clone();
+        let raft_request_incoming_tx = self.raft_request_incoming_tx.clone();
 
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
@@ -104,7 +109,7 @@ impl Raft for RaftService {
                 let (oneshot_tx, oneshot_rx) = oneshot::channel();
 
                 // Forward to LogManager
-                if let Err(e) = raft_request_tx.send(RaftRequest::RequestVoteRequest {
+                if let Err(e) = raft_request_incoming_tx.send(RaftRequest::RequestVoteRequest {
                     request: req,
                     oneshot_tx,
                 }) {
