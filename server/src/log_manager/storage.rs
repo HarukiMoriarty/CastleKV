@@ -77,6 +77,8 @@ pub(crate) struct RaftLog {
     base_path: String,
     /// Maximum size of each segment in bytes
     max_segment_size: usize,
+    /// in-memory log entries
+    entries: Vec<LogEntry>,
 }
 
 impl RaftLog {
@@ -165,12 +167,21 @@ impl RaftLog {
             segments.pop().unwrap()
         };
 
-        Ok(RaftLog {
+        // Create an empty entries vector - we'll load them separately
+        let entries = Vec::new();
+
+        let mut log = RaftLog {
             segments,
             current_segment,
             base_path: base_path.to_string(),
             max_segment_size,
-        })
+            entries,
+        };
+
+        // Load all entries into memory
+        log.entries = log.load_all_entries()?;
+        
+        Ok(log)
     }
 
     /// Appends a new log entry and creates a new segment when the current one reaches its size limit
@@ -200,7 +211,13 @@ impl RaftLog {
             ));
         }
 
-        self.current_segment.append(&entry)
+        // Append to disk
+        self.current_segment.append(&entry)?;
+        
+        // Also append to in-memory entries
+        self.entries.push(entry);
+        
+        Ok(())
     }
 
     /// Loads all log entries from all segments
@@ -218,6 +235,41 @@ impl RaftLog {
         let mut current_entries = self.current_segment.load_entries()?;
         all_entries.append(&mut current_entries);
 
+        debug!("Loaded {} log entries into memory", all_entries.len());
         Ok(all_entries)
+    }
+
+    /// Get the index of the last log entry
+    pub fn get_last_index(&self) -> u64 {
+        if let Some(entry) = self.entries.last() {
+            entry.index
+        } else {
+            0 // Return 0 if log is empty
+        }
+    }
+
+    /// Get the term of the last log entry
+    pub fn get_last_term(&self) -> u64 {
+        if let Some(entry) = self.entries.last() {
+            entry.term
+        } else {
+            0 // Return 0 if log is empty
+        }
+    }
+    
+    /// Get a log entry at a specific index
+    pub fn get_entry(&self, index: u64) -> Option<&LogEntry> {
+        // Find the entry with the matching index
+        // This assumes entries are stored in order by index
+        self.entries.iter().find(|entry| entry.index == index)
+    }
+    
+    /// Get all entries starting from a specific index
+    pub fn get_entries_from(&self, start_index: u64) -> Vec<LogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.index >= start_index)
+            .cloned()
+            .collect()
     }
 }

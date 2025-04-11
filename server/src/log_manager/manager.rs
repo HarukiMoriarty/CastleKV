@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
@@ -11,11 +11,12 @@ use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::log_manager::comm::LogManagerMessage;
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
+use crate::log_manager::raft_session::RaftSession;
 use crate::log_manager::storage::RaftLog;
 use crate::log_manager::RaftRequestIncomingReceiver;
 use crate::plan::Plan;
 use rpc::gateway::Command;
-use rpc::raft::{raft_server::RaftServer, LogEntry};
+use rpc::raft::{raft_server::RaftServer, LogEntry, AppendEntriesRequest, RequestVoteRequest, AppendEntriesResponse, RequestVoteResponse};
 
 /// Represents the possible states of a node in the Raft
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,8 @@ pub struct LogManager {
     executor_rx: mpsc::UnboundedReceiver<LogManagerMessage>,
     /// Reference to the key-value database
     db: Arc<KeyValueDb>,
+    /// Raft session for managing peer connections
+    raft_session: Arc<Mutex<RaftSession>>,
     /// Unique identifier for this node
     node_id: NodeId,
     /// Map of peer nodes (node_id -> network address)
@@ -81,7 +84,7 @@ impl LogManager {
     /// * `rx` - Channel receiver for log manager messages
     /// * `db` - Reference to the key-value database
     /// * `max_segment_size` - Maximum size of each log segment in bytes
-    pub fn new(
+    pub async fn new(
         config: &ServerConfig,
         executor_rx: mpsc::UnboundedReceiver<LogManagerMessage>,
         db: Arc<KeyValueDb>,
@@ -149,6 +152,7 @@ impl LogManager {
             log,
             executor_rx,
             db,
+            raft_session: Arc::new(Mutex::new(RaftSession::new(config.peer_replica_addr.clone()).await)),
             node_id: config.node_id,
             peers: config.peer_replica_addr.clone(),
             current_state: NodeState::Follower {
@@ -187,7 +191,8 @@ impl LogManager {
                             unimplemented!();
                         },
                         _ = heartbeat_interval.tick() => {
-                            unimplemented!();
+                            self.send_heartbeats().await;
+                            self.last_heartbeat = Instant::now();
                         },
                     }
                 }
@@ -197,8 +202,28 @@ impl LogManager {
                 } => {
                     tokio::select! {
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
-                            unimplemented!();
-                            election_deadline = self.last_heartbeat + self.election_timeout;
+                            match raft_msg {
+                                RaftRequest::AppendEntriesRequest {
+                                    request,
+                                    oneshot_tx,
+                                } => {
+                                    if request.entries.len() == 0 {
+                                        // Heartbeat
+                                        self.follower_handle_heartbeat(request, oneshot_tx).await;
+                                    } else {
+                                        // TODO: Handle append entries request
+                                        unimplemented!();
+                                    }
+                                    election_deadline = self.last_heartbeat + self.election_timeout;
+                                }
+                                RaftRequest::RequestVoteRequest {
+                                    request,
+                                    oneshot_tx,
+                                } => {
+                                    // TODO: Handle request vote request
+                                    unimplemented!();
+                                }
+                            }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
                             info!("Election timeout reached. Becoming candidate.");
@@ -292,6 +317,151 @@ impl LogManager {
                 if resp_tx.send(index).is_err() {
                     warn!("Failed to send log append response - receiver dropped");
                 }
+            }
+        }
+    }
+
+        /// Send heartbeats to all followers
+    async fn send_heartbeats(&self) {
+        debug!("Sending heartbeat to followers");
+        
+        // For each follower, prepare and send AppendEntries
+        let last_log_index = self.log.get_last_index();
+        let last_log_term = self.log.get_last_term();
+        
+        // Create a heartbeat request (empty AppendEntries)
+        let heartbeat_request = AppendEntriesRequest {
+            leader_id: self.node_id.0,
+            term: self.current_term,
+            prev_log_index: last_log_index,
+            prev_log_term: last_log_term,
+            entries: vec![],  // Empty for heartbeat
+            leader_commit: self.commit_index,
+        };
+        
+        // Clone the session for the spawned task
+        let raft_session = Arc::clone(&self.raft_session);
+
+        tokio::spawn(async move {
+            match RaftSession::broadcast_append_entries(raft_session, heartbeat_request).await {
+                Ok(responses) => {
+                    debug!("Received {} successful heartbeat responses", responses.len());
+                },
+                Err(e) => {
+                    warn!("Failed to reach majority with heartbeat: {}", e);
+                }
+            }
+        });
+    }
+    
+    async fn follower_handle_heartbeat(
+        &mut self,
+        request: AppendEntriesRequest,
+        oneshot_tx: oneshot::Sender<AppendEntriesResponse>,
+    ) {
+        debug!("Received heartbeat from leader {}", request.leader_id);
+        let mut success = true;
+        
+        // 1. Term Verification and Update
+        if request.term < self.current_term {
+            // Reject heartbeat from outdated leader
+            debug!("Rejecting heartbeat from outdated leader (term {} < our term {})", 
+                   request.term, self.current_term);
+            success = false;
+        } else if request.term > self.current_term {
+            // Update follower's term if leader's term is higher
+            debug!("Updating term from {} to {}", self.current_term, request.term);
+            // TODO: persist currentTerm, voteFor
+            self.current_term = request.term;
+            self.voted_for = None; // Reset vote when term changes
+        }
+        
+        // 2. Log Consistency Check
+        if success {
+            // Check if follower's log contains an entry at prevLogIndex with matching term
+            if request.prev_log_index > 0 {
+                match self.log.get_entry(request.prev_log_index) {
+                    Some(entry) => {
+                        if entry.term != request.prev_log_term {
+                            debug!("Log inconsistency: entry at index {} has term {}, but leader expects term {}",
+                                   request.prev_log_index, entry.term, request.prev_log_term);
+                            success = false;
+                        }
+                    },
+                    None => {
+                        if request.prev_log_index > 0 {
+                            debug!("Log inconsistency: missing entry at index {}", request.prev_log_index);
+                            success = false;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 3. Update Leader Information
+        if success {
+            // Update leader information
+            if let NodeState::Follower { leader_id, leader_addr } = &mut self.current_state {
+                *leader_id = request.leader_id;
+                *leader_addr = self.peers.get(&request.leader_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+            } else {
+                // If we're not already a follower, become one
+                self.current_state = NodeState::Follower {
+                    leader_id: request.leader_id,
+                    leader_addr: self.peers.get(&request.leader_id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                };
+            }
+            
+            // 4. Update Commit Index (if needed)
+            if request.leader_commit > self.commit_index {
+                let last_log_index = self.log.get_last_index();
+                self.commit_index = request.leader_commit.min(last_log_index);
+                debug!("Updated commit index to {}", self.commit_index);
+                
+                // Apply newly committed entries to state machine
+                self.apply_committed_entries().await;
+            }
+        }
+        
+        // 5. Reset Election Timer
+        self.last_heartbeat = Instant::now();
+        
+        // 6. Send Response
+        let response = AppendEntriesResponse {
+            term: self.current_term,
+            success,
+        };
+        
+        if oneshot_tx.send(response).is_err() {
+            error!("Failed to send heartbeat response");
+        }
+    }
+
+    // Helper method to apply committed entries to the state machine
+    async fn apply_committed_entries(&mut self) {
+        while self.last_applied < self.commit_index {
+            self.last_applied += 1;
+            
+            if let Some(entry) = self.log.get_entry(self.last_applied) {
+                if let Some(command) = &entry.command {
+                    debug!("Applying log entry {} to state machine", self.last_applied);
+                    
+                    match Plan::from_log_command(command) {
+                        Ok(plan) => {
+                            self.db.execute(&plan);
+                        }
+                        Err(e) => {
+                            error!("Failed to create plan from log entry: {}", e);
+                        }
+                    }
+                }
+            } else {
+                error!("Missing log entry at index {}", self.last_applied);
+                break;
             }
         }
     }

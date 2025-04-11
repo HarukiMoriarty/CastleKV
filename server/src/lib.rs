@@ -136,7 +136,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     }
 
     // Start log manager
-    let log_manager = LogManager::new(config, log_manager_rx, db.clone());
+    let log_manager = LogManager::new(config, log_manager_rx, db.clone()).await;
     tokio::spawn(log_manager.run());
     info!("Started log manager service");
 

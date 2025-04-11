@@ -99,3 +99,5 @@ The client provides an interactive terminal where you can:
 - [x] Add multi-table support with independent partitioning
 - [ ] Add support for replicas (Raft)
 - [x] Implement server recovery from log
+- [x] heartbeat mechanism for leader election
+- [ ] persist states {currentTerm, voteFor} and crash recovery
