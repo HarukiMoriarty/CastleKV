@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
-use crate::log_manager::comm::LogManagerMessage;
+use crate::log_manager::comm::{ElectionResult, LogManagerMessage};
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::raft_session::RaftSession;
 use crate::log_manager::storage::RaftLog;
@@ -73,6 +73,9 @@ pub struct LogManager {
 
     /// Receiver for incoming raft request messages from peers
     raft_request_incoming_rx: RaftRequestIncomingReceiver,
+
+    /// Election result - shared between the main loop and election task
+    election_result: Arc<Mutex<Option<ElectionResult>>>,
 }
 
 impl LogManager {
@@ -148,6 +151,9 @@ impl LogManager {
                 .unwrap();
         });
 
+        // Initialize with no election result
+        let election_result = Arc::new(Mutex::new(None));
+
         LogManager {
             log,
             executor_rx,
@@ -166,6 +172,7 @@ impl LogManager {
             last_heartbeat: Instant::now(),
             election_timeout: Duration::from_millis(300 + rand::random::<u64>() % 200),
             raft_request_incoming_rx,
+            election_result,
         }
     }
 
@@ -220,24 +227,68 @@ impl LogManager {
                                     request,
                                     oneshot_tx,
                                 } => {
-                                    // TODO: Handle request vote request
-                                    unimplemented!();
+                                    self.handle_request_vote(request, oneshot_tx).await;
                                 }
                             }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
                             info!("Election timeout reached. Becoming candidate.");
+                            self.start_election().await;
+                            election_deadline = self.last_heartbeat + self.election_timeout;
                         }
                     }
                 }
                 NodeState::Candidate => {
                     tokio::select! {
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
-                            unimplemented!();
+                            match raft_msg {
+                                RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
+                                    // If we receive an AppendEntries with term >= our term,
+                                    // we should revert to follower
+                                    if request.term >= self.current_term {
+                                        info!("Received AppendEntries from leader with term >= our term. Reverting to follower.");
+                                        // TODO: persist currentTerm, voteFor
+                                        self.current_term = request.term;
+                                        self.voted_for = None;
+                                        self.current_state = NodeState::Follower {
+                                            leader_id: request.leader_id,
+                                            leader_addr: self.peers.get(&request.leader_id)
+                                                .cloned()
+                                                .unwrap_or_else(|| "unknown".to_string()),
+                                        };
+                                        
+                                        // Handle the request as a follower would
+                                        self.follower_handle_heartbeat(request, oneshot_tx).await;
+                                    } else {
+                                        // Reject AppendEntries from outdated leader
+                                        let response = AppendEntriesResponse {
+                                            term: self.current_term,
+                                            success: false,
+                                        };
+                                        if oneshot_tx.send(response).is_err() {
+                                            error!("Failed to send AppendEntries response");
+                                        }
+                                    }
+                                },
+                                RaftRequest::RequestVoteRequest { request, oneshot_tx } => {
+                                    self.handle_request_vote(request, oneshot_tx).await;
+                                },
+                            }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
                             info!("Election retry timeout. Starting new election.");
+                            self.start_election().await;
+                            election_deadline = self.last_heartbeat + self.election_timeout;
                         },
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                            // Periodically check if we've won the election
+                            if let Some(vote_result) = self.check_election_result() {
+                                if vote_result {
+                                    info!("Won election for term {}. Becoming leader.", self.current_term);
+                                    self.become_leader().await;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -321,7 +372,7 @@ impl LogManager {
         }
     }
 
-        /// Send heartbeats to all followers
+    /// Send heartbeats to all followers
     async fn send_heartbeats(&self) {
         debug!("Sending heartbeat to followers");
         
@@ -464,5 +515,165 @@ impl LogManager {
                 break;
             }
         }
+    }
+
+    async fn start_election(&mut self) {
+        info!("[Node {}] Starting election for term {}", self.node_id.0, self.current_term + 1);
+        
+        // 1. Increment current term
+        self.current_term += 1;
+        // TODO: persist currentTerm
+        
+        // 2. Transition to candidate state
+        self.current_state = NodeState::Candidate;
+        
+        // 3. Vote for self
+        self.voted_for = Some(self.node_id.0);
+        // TODO: persist voteFor
+        
+        // 4. Reset election timer with randomization
+        self.election_timeout = Duration::from_millis(300 + rand::random::<u64>() % 200);
+        self.last_heartbeat = Instant::now();
+        
+        // 5. Prepare RequestVote RPC
+        let last_log_index = self.log.get_last_index();
+        let last_log_term = self.log.get_last_term();
+        
+        let request = RequestVoteRequest {
+            term: self.current_term,
+            candidate_id: self.node_id.0,
+            last_log_index,
+            last_log_term,
+        };
+        
+        // 6. Send RequestVote RPCs to all other servers
+        let raft_session = Arc::clone(&self.raft_session);
+        let current_term = self.current_term;
+        let node_id = self.node_id.0;
+        let election_result = Arc::clone(&self.election_result);
+        
+        // Reset election result
+        {
+            let mut result = self.election_result.lock().await;
+            *result = None;
+        }
+        
+        // Spawn a task to collect votes
+        tokio::spawn(async move {
+            match RaftSession::broadcast_request_vote(raft_session, request).await {
+                Ok(_) => {
+                    info!(
+                        "Node {} won election for term {}",
+                        node_id, current_term
+                    );
+                    
+                    // Set the election result
+                    let mut result = election_result.lock().await;
+                    *result = Some(ElectionResult {
+                        won: true,
+                        term: current_term,
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to collect majority votes: {}", e);
+                    
+                    // Set negative result
+                    let mut result = election_result.lock().await;
+                    *result = Some(ElectionResult {
+                        won: false,
+                        term: current_term,
+                    });
+                }
+            }
+        });
+    }
+
+    async fn handle_request_vote(
+        &mut self,
+        request: RequestVoteRequest,
+        oneshot_tx: oneshot::Sender<RequestVoteResponse>,
+    ) {
+        let mut vote_granted = false;
+        
+        // If the candidate's term is greater than ours, update our term
+        if request.term > self.current_term {
+            // TODO: persist currentTerm, voteFor
+            self.current_term = request.term;
+            self.voted_for = None;
+            
+            // If we were a candidate or leader, revert to follower
+            if !matches!(self.current_state, NodeState::Follower { .. }) {
+                self.current_state = NodeState::Follower {
+                    leader_id: 0, // Unknown leader
+                    leader_addr: "unknown".to_string(),
+                };
+            }
+        }
+        
+        // Decide whether to grant vote
+        if request.term < self.current_term {
+            // Reject vote if candidate's term is outdated
+            vote_granted = false;
+        } else if self.voted_for.is_none() || self.voted_for == Some(request.candidate_id) {
+            // Check if candidate's log is at least as up-to-date as ours
+            let last_log_index = self.log.get_last_index();
+            let last_log_term = self.log.get_last_term();
+            
+            if request.last_log_term > last_log_term || 
+               (request.last_log_term == last_log_term && request.last_log_index >= last_log_index) {
+                // Grant vote
+                vote_granted = true;
+                self.voted_for = Some(request.candidate_id);
+                // TODO: persist voteFor
+                self.last_heartbeat = Instant::now(); // Reset election timer
+            }
+        }
+        
+        // Send response
+        let response = RequestVoteResponse {
+            term: self.current_term,
+            vote_granted,
+        };
+        
+        if oneshot_tx.send(response).is_err() {
+            error!("Failed to send RequestVote response");
+        }
+    }
+
+    async fn become_leader(&mut self) {
+        // Initialize leader state
+        let mut next_index = HashMap::new();
+        let mut match_index = HashMap::new();
+        
+        // Initialize nextIndex for each server to last log index + 1
+        let last_log_index = self.log.get_last_index();
+        
+        for peer_addr in self.peers.values() {
+            next_index.insert(peer_addr.clone(), last_log_index + 1);
+            match_index.insert(peer_addr.clone(), 0);
+        }
+        
+        // Transition to leader state
+        self.current_state = NodeState::Leader {
+            next_index,
+            match_index,
+        };
+        
+        // Send initial empty AppendEntries RPCs (heartbeats) to establish authority
+        self.send_heartbeats().await;
+    }
+
+    fn check_election_result(&mut self) -> Option<bool> {
+        // Get the current election result
+        if let Ok(guard) = self.election_result.try_lock() {
+            if let Some(result) = *guard {
+                // Only accept results for the current term
+                if result.term == self.current_term {
+                    return Some(result.won);
+                }
+            }
+        }
+        
+        None
     }
 }
