@@ -16,7 +16,10 @@ use crate::log_manager::storage::RaftLog;
 use crate::log_manager::RaftRequestIncomingReceiver;
 use crate::plan::Plan;
 use rpc::gateway::Command;
-use rpc::raft::{raft_server::RaftServer, LogEntry, AppendEntriesRequest, RequestVoteRequest, AppendEntriesResponse, RequestVoteResponse};
+use rpc::raft::{
+    raft_server::RaftServer, AppendEntriesRequest, AppendEntriesResponse, LogEntry,
+    RequestVoteRequest, RequestVoteResponse,
+};
 
 /// Represents the possible states of a node in the Raft
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +161,9 @@ impl LogManager {
             log,
             executor_rx,
             db,
-            raft_session: Arc::new(Mutex::new(RaftSession::new(config.peer_replica_addr.clone()).await)),
+            raft_session: Arc::new(Mutex::new(
+                RaftSession::new(config.peer_replica_addr.clone()).await,
+            )),
             node_id: config.node_id,
             peers: config.peer_replica_addr.clone(),
             current_state: NodeState::Follower {
@@ -256,7 +261,7 @@ impl LogManager {
                                                 .cloned()
                                                 .unwrap_or_else(|| "unknown".to_string()),
                                         };
-                                        
+
                                         // Handle the request as a follower would
                                         self.follower_handle_heartbeat(request, oneshot_tx).await;
                                     } else {
@@ -375,36 +380,39 @@ impl LogManager {
     /// Send heartbeats to all followers
     async fn send_heartbeats(&self) {
         debug!("Sending heartbeat to followers");
-        
+
         // For each follower, prepare and send AppendEntries
         let last_log_index = self.log.get_last_index();
         let last_log_term = self.log.get_last_term();
-        
+
         // Create a heartbeat request (empty AppendEntries)
         let heartbeat_request = AppendEntriesRequest {
             leader_id: self.node_id.0,
             term: self.current_term,
             prev_log_index: last_log_index,
             prev_log_term: last_log_term,
-            entries: vec![],  // Empty for heartbeat
+            entries: vec![], // Empty for heartbeat
             leader_commit: self.commit_index,
         };
-        
+
         // Clone the session for the spawned task
         let raft_session = Arc::clone(&self.raft_session);
 
         tokio::spawn(async move {
             match RaftSession::broadcast_append_entries(raft_session, heartbeat_request).await {
                 Ok(responses) => {
-                    debug!("Received {} successful heartbeat responses", responses.len());
-                },
+                    debug!(
+                        "Received {} successful heartbeat responses",
+                        responses.len()
+                    );
+                }
                 Err(e) => {
                     warn!("Failed to reach majority with heartbeat: {}", e);
                 }
             }
         });
     }
-    
+
     async fn follower_handle_heartbeat(
         &mut self,
         request: AppendEntriesRequest,
@@ -412,21 +420,26 @@ impl LogManager {
     ) {
         debug!("Received heartbeat from leader {}", request.leader_id);
         let mut success = true;
-        
+
         // 1. Term Verification and Update
         if request.term < self.current_term {
             // Reject heartbeat from outdated leader
-            debug!("Rejecting heartbeat from outdated leader (term {} < our term {})", 
-                   request.term, self.current_term);
+            debug!(
+                "Rejecting heartbeat from outdated leader (term {} < our term {})",
+                request.term, self.current_term
+            );
             success = false;
         } else if request.term > self.current_term {
             // Update follower's term if leader's term is higher
-            debug!("Updating term from {} to {}", self.current_term, request.term);
+            debug!(
+                "Updating term from {} to {}",
+                self.current_term, request.term
+            );
             // TODO: persist currentTerm, voteFor
             self.current_term = request.term;
             self.voted_for = None; // Reset vote when term changes
         }
-        
+
         // 2. Log Consistency Check
         if success {
             // Check if follower's log contains an entry at prevLogIndex with matching term
@@ -438,55 +451,66 @@ impl LogManager {
                                    request.prev_log_index, entry.term, request.prev_log_term);
                             success = false;
                         }
-                    },
+                    }
                     None => {
                         if request.prev_log_index > 0 {
-                            debug!("Log inconsistency: missing entry at index {}", request.prev_log_index);
+                            debug!(
+                                "Log inconsistency: missing entry at index {}",
+                                request.prev_log_index
+                            );
                             success = false;
                         }
                     }
                 }
             }
         }
-        
+
         // 3. Update Leader Information
         if success {
             // Update leader information
-            if let NodeState::Follower { leader_id, leader_addr } = &mut self.current_state {
+            if let NodeState::Follower {
+                leader_id,
+                leader_addr,
+            } = &mut self.current_state
+            {
                 *leader_id = request.leader_id;
-                *leader_addr = self.peers.get(&request.leader_id)
+                *leader_addr = self
+                    .peers
+                    .get(&request.leader_id)
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string());
             } else {
                 // If we're not already a follower, become one
                 self.current_state = NodeState::Follower {
                     leader_id: request.leader_id,
-                    leader_addr: self.peers.get(&request.leader_id)
+                    leader_addr: self
+                        .peers
+                        .get(&request.leader_id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
                 };
             }
-            
+
             // 4. Update Commit Index (if needed)
             if request.leader_commit > self.commit_index {
                 let last_log_index = self.log.get_last_index();
                 self.commit_index = request.leader_commit.min(last_log_index);
                 debug!("Updated commit index to {}", self.commit_index);
-                
+
                 // Apply newly committed entries to state machine
                 self.apply_committed_entries().await;
             }
         }
-        
+
         // 5. Reset Election Timer
         self.last_heartbeat = Instant::now();
-        
+
         // 6. Send Response
         let response = AppendEntriesResponse {
             term: self.current_term,
             success,
         };
-        
+
         if oneshot_tx.send(response).is_err() {
             error!("Failed to send heartbeat response");
         }
@@ -496,11 +520,11 @@ impl LogManager {
     async fn apply_committed_entries(&mut self) {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            
+
             if let Some(entry) = self.log.get_entry(self.last_applied) {
                 if let Some(command) = &entry.command {
                     debug!("Applying log entry {} to state machine", self.last_applied);
-                    
+
                     match Plan::from_log_command(command) {
                         Ok(plan) => {
                             self.db.execute(&plan);
@@ -518,55 +542,56 @@ impl LogManager {
     }
 
     async fn start_election(&mut self) {
-        info!("[Node {}] Starting election for term {}", self.node_id.0, self.current_term + 1);
-        
+        info!(
+            "[Node {}] Starting election for term {}",
+            self.node_id.0,
+            self.current_term + 1
+        );
+
         // 1. Increment current term
         self.current_term += 1;
         // TODO: persist currentTerm
-        
+
         // 2. Transition to candidate state
         self.current_state = NodeState::Candidate;
-        
+
         // 3. Vote for self
         self.voted_for = Some(self.node_id.0);
         // TODO: persist voteFor
-        
+
         // 4. Reset election timer with randomization
         self.election_timeout = Duration::from_millis(300 + rand::random::<u64>() % 200);
         self.last_heartbeat = Instant::now();
-        
+
         // 5. Prepare RequestVote RPC
         let last_log_index = self.log.get_last_index();
         let last_log_term = self.log.get_last_term();
-        
+
         let request = RequestVoteRequest {
             term: self.current_term,
             candidate_id: self.node_id.0,
             last_log_index,
             last_log_term,
         };
-        
+
         // 6. Send RequestVote RPCs to all other servers
         let raft_session = Arc::clone(&self.raft_session);
         let current_term = self.current_term;
         let node_id = self.node_id.0;
         let election_result = Arc::clone(&self.election_result);
-        
+
         // Reset election result
         {
             let mut result = self.election_result.lock().await;
             *result = None;
         }
-        
+
         // Spawn a task to collect votes
         tokio::spawn(async move {
             match RaftSession::broadcast_request_vote(raft_session, request).await {
                 Ok(_) => {
-                    info!(
-                        "Node {} won election for term {}",
-                        node_id, current_term
-                    );
-                    
+                    info!("Node {} won election for term {}", node_id, current_term);
+
                     // Set the election result
                     let mut result = election_result.lock().await;
                     *result = Some(ElectionResult {
@@ -576,7 +601,7 @@ impl LogManager {
                 }
                 Err(e) => {
                     warn!("Failed to collect majority votes: {}", e);
-                    
+
                     // Set negative result
                     let mut result = election_result.lock().await;
                     *result = Some(ElectionResult {
@@ -594,13 +619,13 @@ impl LogManager {
         oneshot_tx: oneshot::Sender<RequestVoteResponse>,
     ) {
         let mut vote_granted = false;
-        
+
         // If the candidate's term is greater than ours, update our term
         if request.term > self.current_term {
             // TODO: persist currentTerm, voteFor
             self.current_term = request.term;
             self.voted_for = None;
-            
+
             // If we were a candidate or leader, revert to follower
             if !matches!(self.current_state, NodeState::Follower { .. }) {
                 self.current_state = NodeState::Follower {
@@ -609,7 +634,7 @@ impl LogManager {
                 };
             }
         }
-        
+
         // Decide whether to grant vote
         if request.term < self.current_term {
             // Reject vote if candidate's term is outdated
@@ -618,9 +643,11 @@ impl LogManager {
             // Check if candidate's log is at least as up-to-date as ours
             let last_log_index = self.log.get_last_index();
             let last_log_term = self.log.get_last_term();
-            
-            if request.last_log_term > last_log_term || 
-               (request.last_log_term == last_log_term && request.last_log_index >= last_log_index) {
+
+            if request.last_log_term > last_log_term
+                || (request.last_log_term == last_log_term
+                    && request.last_log_index >= last_log_index)
+            {
                 // Grant vote
                 vote_granted = true;
                 self.voted_for = Some(request.candidate_id);
@@ -628,13 +655,13 @@ impl LogManager {
                 self.last_heartbeat = Instant::now(); // Reset election timer
             }
         }
-        
+
         // Send response
         let response = RequestVoteResponse {
             term: self.current_term,
             vote_granted,
         };
-        
+
         if oneshot_tx.send(response).is_err() {
             error!("Failed to send RequestVote response");
         }
@@ -644,21 +671,21 @@ impl LogManager {
         // Initialize leader state
         let mut next_index = HashMap::new();
         let mut match_index = HashMap::new();
-        
+
         // Initialize nextIndex for each server to last log index + 1
         let last_log_index = self.log.get_last_index();
-        
+
         for peer_addr in self.peers.values() {
             next_index.insert(peer_addr.clone(), last_log_index + 1);
             match_index.insert(peer_addr.clone(), 0);
         }
-        
+
         // Transition to leader state
         self.current_state = NodeState::Leader {
             next_index,
             match_index,
         };
-        
+
         // Send initial empty AppendEntries RPCs (heartbeats) to establish authority
         self.send_heartbeats().await;
     }
@@ -673,7 +700,7 @@ impl LogManager {
                 }
             }
         }
-        
+
         None
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{error, info};
@@ -9,12 +10,19 @@ use rpc::manager::{
     RegisterServerResponse,
 };
 
+// Import the storage module
+use crate::storage::ManagerStorage;
+
 /// Manager for handling server registration and partition assignment
 pub struct Manager {
     /// List of server addresses
     server_addresses: Vec<String>,
     /// Partition assignments for each server
     partition_assignments: Arc<RwLock<HashMap<String, Vec<PartitionInfo>>>>,
+    /// Server replication factor
+    replication_factor: u32,
+    /// Storage for persistence
+    storage: Option<ManagerStorage>,
 }
 
 impl Manager {
@@ -24,13 +32,53 @@ impl Manager {
     ///
     /// * `server_addresses` - List of server addresses
     /// * `tables` - Map of table names to key space sizes
-    pub fn new(server_addresses: Vec<String>, tables: &HashMap<String, u64>) -> Self {
+    /// * `replication_factor` - The replication factor for partitions
+    /// * `storage_path` - Optional path for persistence
+    pub fn new(
+        server_addresses: Vec<String>,
+        tables: &HashMap<String, u64>,
+        replication_factor: u32,
+        storage_path: Option<PathBuf>,
+    ) -> Self {
+        // Initialize storage if path is provided
+        let storage = match storage_path {
+            Some(path) => match ManagerStorage::new(path.clone()) {
+                Ok(storage) => {
+                    info!("Storage initialized at {:?}", path);
+                    Some(storage)
+                }
+                Err(err) => {
+                    error!("Failed to initialize storage: {}", err);
+                    None
+                }
+            },
+            None => None,
+        };
+
         let manager = Self {
             server_addresses: server_addresses.clone(),
             partition_assignments: Arc::new(RwLock::new(HashMap::new())),
+            replication_factor,
+            storage,
         };
 
         manager.initialize_partitions(tables);
+
+        // Save state to storage if available
+        if let Some(storage) = &manager.storage {
+            let assignments = manager.partition_assignments.read().unwrap();
+            if let Err(err) = storage.save_partition_assignments(&assignments) {
+                error!("Failed to save partition assignments: {}", err);
+            }
+
+            if let Err(err) = storage.save_server_addresses(&server_addresses) {
+                error!("Failed to save server addresses: {}", err);
+            }
+
+            if let Err(err) = storage.save_replication_factor(replication_factor) {
+                error!("Failed to save replication factor: {}", err);
+            }
+        }
 
         // Log initialization info
         let tables_info: Vec<String> = tables
@@ -39,8 +87,9 @@ impl Manager {
             .collect();
 
         info!(
-            "Manager initialized with {} servers, tables: {}",
+            "Manager initialized with {} servers, replication factor: {}, tables: {}",
             server_addresses.len(),
+            replication_factor,
             tables_info.join(", ")
         );
 
@@ -54,6 +103,18 @@ impl Manager {
     /// * `tables` - Map of table names to key space sizes
     fn initialize_partitions(&self, tables: &HashMap<String, u64>) {
         let server_count = self.server_addresses.len();
+        if server_count == 0 {
+            error!("Cannot initialize partitions: no servers available");
+            return;
+        }
+
+        // Calculate number of partitions based on server count and replication factor
+        let partitions_count = server_count / self.replication_factor as usize;
+        if partitions_count == 0 {
+            error!("Not enough servers for the specified replication factor");
+            return;
+        }
+
         let mut assignments = self.partition_assignments.write().unwrap();
 
         // Initialize empty partition list for each server
@@ -63,35 +124,50 @@ impl Manager {
 
         // For each table, assign partitions across servers
         for (table_name, key_num) in tables {
-            let partition_size = *key_num / server_count as u64;
+            let keys_per_partition = *key_num / partitions_count as u64;
 
-            for i in 0..server_count {
-                let start_key = i as u64 * partition_size;
-                let end_key = if i == server_count - 1 {
-                    *key_num // Last server gets remainder
+            for partition_idx in 0..partitions_count {
+                let start_key = partition_idx as u64 * keys_per_partition;
+                let end_key = if partition_idx == partitions_count - 1 {
+                    *key_num // Last partition gets remainder
                 } else {
-                    (i as u64 + 1) * partition_size
+                    (partition_idx as u64 + 1) * keys_per_partition
                 };
 
-                let server_addr = &self.server_addresses[i];
+                // Assign to consecutive servers for each replica
+                let base_server_idx = partition_idx * self.replication_factor as usize;
 
-                // Create partition info
-                let partition_info = PartitionInfo {
-                    table_name: table_name.clone(),
-                    server_address: server_addr.clone(),
-                    start_key,
-                    end_key,
-                };
+                // For each replica of this partition
+                for replica_idx in 0..self.replication_factor as usize {
+                    let server_idx = base_server_idx + replica_idx;
+                    if server_idx >= server_count {
+                        error!(
+                            "Not enough servers for partition {} replica {}",
+                            partition_idx, replica_idx
+                        );
+                        continue;
+                    }
 
-                // Add partition to server's assignments
-                if let Some(server_partitions) = assignments.get_mut(server_addr) {
-                    server_partitions.push(partition_info);
-                }
+                    let server_addr = &self.server_addresses[server_idx];
 
-                info!(
-                    "Server {} assigned table {} partition range: {} to {}",
-                    server_addr, table_name, start_key, end_key
+                    // Create partition info
+                    let partition_info = PartitionInfo {
+                        table_name: table_name.clone(),
+                        server_address: server_addr.clone(),
+                        start_key,
+                        end_key,
+                    };
+
+                    // Add partition to server's assignments
+                    if let Some(server_partitions) = assignments.get_mut(server_addr) {
+                        server_partitions.push(partition_info);
+                    }
+
+                    info!(
+                    "Server {} assigned table {} key range: {} to {} (partition {}, replica {})",
+                    server_addr, table_name, start_key, end_key, partition_idx, replica_idx
                 );
+                }
             }
         }
     }

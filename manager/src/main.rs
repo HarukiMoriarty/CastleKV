@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use common::{init_tracing, set_default_rust_log};
 
@@ -21,6 +22,19 @@ struct Cli {
         help = "Table configurations in format: table1=1000000,table2=2000000 where numbers represent the key space size"
     )]
     tables: String,
+
+    #[arg(
+        long,
+        default_value = "3",
+        help = "The replication factor of a partition"
+    )]
+    server_rf: u32,
+
+    #[arg(
+        long,
+        help = "Path to durable storage directory under ./data/ (optional)"
+    )]
+    backer_path: Option<String>,
 }
 
 #[tokio::main]
@@ -35,12 +49,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse server addresses
     let server_addresses: Vec<String> = parse_server_addresses(&cli.servers)?;
 
+    // Check if server count is divisible by replication factor
+    if server_addresses.len() % cli.server_rf as usize != 0 {
+        return Err(format!(
+            "Number of servers ({}) must be divisible by replication factor ({})",
+            server_addresses.len(),
+            cli.server_rf
+        )
+        .into());
+    }
+
     // Parse and validate table configurations
     let table_config = parse_tables_config(&cli.tables)?;
     validate_table_config(&table_config)?;
 
-    // Create and run the manager
-    let manager = manager::Manager::new(server_addresses, &table_config);
+    // Log configuration
+    tracing::info!("Starting manager with the following configuration:");
+    tracing::info!("  Service address: {}", cli.listen_addr);
+    tracing::info!("  Server replication factor: {}", cli.server_rf);
+    if let Some(path) = &cli.backer_path {
+        tracing::info!("  Backer path: {}", path);
+    } else {
+        tracing::info!("  Backer path: None (in-memory only)");
+    }
+    tracing::info!("  Server count: {}", server_addresses.len());
+    tracing::info!("  Table count: {}", table_config.len());
+
+    // Create storage path if backer_path is provided
+    let storage_path = cli.backer_path.map(|path| PathBuf::from("data").join(path));
+
+    // Create and run the manager with storage and replication factor
+    let manager =
+        manager::Manager::new(server_addresses, &table_config, cli.server_rf, storage_path);
+
     manager::run_manager(cli.listen_addr, manager).await?;
 
     Ok(())
