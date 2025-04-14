@@ -200,7 +200,8 @@ impl LogManager {
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
-                            unimplemented!();
+                            // unimplemented!();
+                            println!("raft_msg: {:?}", raft_msg);
                         },
                         _ = heartbeat_interval.tick() => {
                             self.send_heartbeats().await;
@@ -224,7 +225,8 @@ impl LogManager {
                                         self.follower_handle_heartbeat(request, oneshot_tx).await;
                                     } else {
                                         // TODO: Handle append entries request
-                                        unimplemented!();
+                                        // unimplemented!();
+                                        println!("append entries request: {:?}", request);
                                     }
                                     election_deadline = self.last_heartbeat + self.election_timeout;
                                 }
@@ -316,10 +318,12 @@ impl LogManager {
                     let _ = resp_tx.send(0); // or use Result<u64, Err>
                     return;
                 }
+                info!("Received client request {:?}", cmd_id);
 
                 // Generate log entry
-                let term = 0;
-                let index = 0;
+                let term = self.current_term;
+                let last_index = self.log.get_last_index();
+                let index = last_index + 1;
 
                 let entry = LogEntry {
                     term,
@@ -369,9 +373,69 @@ impl LogManager {
                     }
                 }
 
-                // Send the response with the log index
-                if resp_tx.send(index).is_err() {
-                    warn!("Failed to send log append response - receiver dropped");
+                if !success {
+                    let _ = resp_tx.send(0);
+                    return;
+                }
+
+                // Replicate to followers
+                if let NodeState::Leader { next_index, match_index } = &mut self.current_state {
+                    // Create AppendEntries request
+                    let prev_log_index = index - 1;
+                    let prev_log_term = if prev_log_index > 0 {
+                        match self.log.get_entry(prev_log_index) {
+                            Some(entry) => entry.term,
+                            None => 0,
+                        }
+                    } else {
+                        0
+                    };
+
+                    let append_request = AppendEntriesRequest {
+                        term: self.current_term,
+                        leader_id: self.node_id.0,
+                        prev_log_index,
+                        prev_log_term,
+                        entries: vec![entry.clone()],
+                        leader_commit: self.commit_index,
+                    };
+
+                    // Clone the session for the spawned task
+                    let raft_session = Arc::clone(&self.raft_session);
+                    let current_term = self.current_term;
+                    let entry_index = index;
+
+                    // Spawn a task to handle replication
+                    tokio::spawn(async move {
+                        match RaftSession::broadcast_append_entries(raft_session, append_request).await {
+                            Ok(responses) => {
+                                info!("Successfully replicated entry {} to majority", entry_index);
+                                // Send the response with the log index
+                                if resp_tx.send(entry_index).is_err() {
+                                    warn!("Failed to send log append response - receiver dropped");
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to replicate entry to majority: {}", e);
+                                // Send failure response
+                                if resp_tx.send(0).is_err() {
+                                    warn!("Failed to send log append failure response - receiver dropped");
+                                }
+                            }
+                        }
+                    });
+
+                    // Update next_index and match_index for followers
+                    // This is optimistic - we'll adjust if AppendEntries fails
+                    for (peer_id, _) in &self.peers {
+                        if let Some(peer_addr) = self.peers.get(peer_id) {
+                            next_index.insert(peer_addr.clone(), index + 1);
+                            // We don't update match_index yet - that happens when we get successful responses
+                        }
+                    }
+                } else {
+                    // This shouldn't happen due to the earlier check, but just in case
+                    let _ = resp_tx.send(0);
                 }
             }
         }
