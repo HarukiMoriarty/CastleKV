@@ -3,7 +3,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use rpc::raft::{
     raft_server::Raft, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest,
@@ -86,7 +86,7 @@ impl Raft for RaftService {
                 }
             }
 
-            info!("Raft AppendEntries service done");
+            debug!("Raft AppendEntries service done");
         });
 
         // Return the response stream
@@ -133,7 +133,7 @@ impl Raft for RaftService {
                 }
             }
 
-            info!("Raft RequestVote service done");
+            debug!("Raft RequestVote service done");
         });
 
         // Return the response stream
