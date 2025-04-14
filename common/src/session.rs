@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use rpc::manager::manager_service_client::ManagerServiceClient;
 use rpc::manager::{GetPartitionMapRequest, PartitionInfo};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
@@ -47,7 +47,7 @@ pub struct Session {
     cmds: Option<HashMap<usize, Command>>,
     /// Information about available partitions for key-to-replica lookup
     /// Structured as: table_name -> [(start_key, end_key, replica_id)]
-    partition_map: HashMap<String, Vec<(u64, u64, usize)>>,
+    partition_map: HashMap<String, HashSet<(u64, u64, usize)>>,
     /// ID counter for the next operation
     next_op_id: Option<u32>,
 }
@@ -67,7 +67,7 @@ impl Session {
         debug!("Got partition info: {partition_info:#?}");
 
         // Organize partitions by ranges and extract unique replica IDs
-        let mut partition_map: HashMap<String, Vec<(u64, u64, usize)>> = HashMap::new();
+        let mut partition_map: HashMap<String, HashSet<(u64, u64, usize)>> = HashMap::new();
         let mut replicas_by_id: HashMap<usize, Vec<PartitionInfo>> = HashMap::new();
         let mut next_replica_id = 0;
         let mut key_ranges: HashMap<(String, u64, u64), usize> = HashMap::new();
@@ -97,9 +97,11 @@ impl Session {
             // Add to partition_map for lookup
             partition_map
                 .entry(key.0.clone())
-                .or_insert_with(Vec::new)
-                .push((key.1, key.2, replica_id));
+                .or_insert_with(|| HashSet::new())
+                .insert((key.1, key.2, replica_id));
         }
+
+        debug!("Create partition map {partition_map:?}");
 
         // For each replica group, connect to one server
         let mut replicas = HashMap::new();
@@ -126,6 +128,7 @@ impl Session {
                 .await
                 .with_context(|| format!("Failed to connect to server: {}", connected_server))?;
 
+            debug!("Connect to server: {connected_server} replica: {replica_id}");
             // Create replica group
             let replica_group = ReplicaGroup {
                 servers,
