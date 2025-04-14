@@ -6,20 +6,30 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
-use tracing::{debug, trace};
+use tracing::{debug, info, trace, warn};
 
 use super::{extract_key, form_key, metadata, CommandId};
 use rpc::gateway::db_client::DbClient;
 use rpc::gateway::{Command, CommandResult, Operation, Status};
 
+/// Represents a partition replica group
+struct ReplicaGroup {
+    /// All server addresses in this replica group
+    servers: Vec<String>,
+    /// The currently connected server address
+    connected_server: String,
+    /// Sender for commands to the currently connected server
+    tx: mpsc::Sender<Command>,
+    /// Receiver for results from the currently connected server
+    rx: Streaming<CommandResult>,
+}
+
 /// Client connection state
 enum Client {
     /// Connected to remote servers
     Remote {
-        /// Map of server addresses to command sender channels
-        txs: HashMap<String, mpsc::Sender<Command>>,
-        /// Map of server addresses to command result receiver streams
-        rxs: HashMap<String, Streaming<CommandResult>>,
+        /// Map of replica IDs to ReplicaGroup
+        replicas: HashMap<usize, ReplicaGroup>,
     },
     /// Dry run mode for testing/debugging
     DryRun,
@@ -33,10 +43,11 @@ pub struct Session {
     client: Client,
     /// Name of the session
     name: String,
-    /// Map of server to commands during command building
-    cmds: Option<HashMap<String, Command>>,
-    /// Information about available partitions and their server locations
-    partition_info: Vec<PartitionInfo>,
+    /// Map of replica ID to commands during command building
+    cmds: Option<HashMap<usize, Command>>,
+    /// Information about available partitions for key-to-replica lookup
+    /// Structured as: table_name -> [(start_key, end_key, replica_id)]
+    partition_map: HashMap<String, Vec<(u64, u64, usize)>>,
     /// ID counter for the next operation
     next_op_id: Option<u32>,
 }
@@ -55,26 +66,82 @@ impl Session {
         let partition_info = response.into_inner().partitions;
         debug!("Got partition info: {partition_info:#?}");
 
-        // Connect to each unique partition server
-        let mut txs = HashMap::new();
-        let mut rxs = HashMap::new();
-        let mut unique_servers = HashMap::new();
+        // Organize partitions by ranges and extract unique replica IDs
+        let mut partition_map: HashMap<String, Vec<(u64, u64, usize)>> = HashMap::new();
+        let mut replicas_by_id: HashMap<usize, Vec<PartitionInfo>> = HashMap::new();
+        let mut next_replica_id = 0;
+        let mut key_ranges: HashMap<(String, u64, u64), usize> = HashMap::new();
 
+        // First pass: identify unique key ranges and assign replica IDs
         for partition in &partition_info {
-            unique_servers.insert(partition.server_address.clone(), true);
+            let key = (
+                partition.table_name.clone(),
+                partition.start_key,
+                partition.end_key,
+            );
+
+            // If this key range doesn't have a replica ID yet, assign one
+            if !key_ranges.contains_key(&key) {
+                key_ranges.insert(key.clone(), next_replica_id);
+                next_replica_id += 1;
+            }
+
+            let replica_id = *key_ranges.get(&key).unwrap();
+
+            // Add to replicas_by_id for connection setup
+            replicas_by_id
+                .entry(replica_id)
+                .or_insert_with(Vec::new)
+                .push(partition.clone());
+
+            // Add to partition_map for lookup
+            partition_map
+                .entry(key.0.clone())
+                .or_insert_with(Vec::new)
+                .push((key.1, key.2, replica_id));
         }
 
-        for server_address in unique_servers.keys() {
-            connect_to_server(server_address, name, &mut txs, &mut rxs)
+        // For each replica group, connect to one server
+        let mut replicas = HashMap::new();
+        for (replica_id, partitions) in &replicas_by_id {
+            if partitions.is_empty() {
+                continue;
+            }
+
+            // Get all unique servers in this replica group
+            let mut servers_set = std::collections::HashSet::new();
+            for partition in partitions {
+                servers_set.insert(partition.server_address.clone());
+            }
+
+            let servers: Vec<String> = servers_set.into_iter().collect();
+
+            if servers.is_empty() {
+                continue;
+            }
+
+            // Connect to the first server in the replica group
+            let connected_server = servers[0].clone();
+            let (tx, rx) = connect_to_server(&connected_server, name)
                 .await
-                .with_context(|| format!("Failed to connect to server: {}", server_address))?;
+                .with_context(|| format!("Failed to connect to server: {}", connected_server))?;
+
+            // Create replica group
+            let replica_group = ReplicaGroup {
+                servers,
+                connected_server,
+                tx,
+                rx,
+            };
+
+            replicas.insert(*replica_id, replica_group);
         }
 
         Ok(Self {
-            client: Client::Remote { txs, rxs },
+            client: Client::Remote { replicas },
             cmds: None,
             name: name.to_owned(),
-            partition_info,
+            partition_map,
             next_op_id: None,
         })
     }
@@ -86,7 +153,7 @@ impl Session {
             client: Client::DryRun,
             cmds: None,
             name: name.to_owned(),
-            partition_info: Vec::new(),
+            partition_map: HashMap::new(),
             next_op_id: None,
         }
     }
@@ -96,14 +163,13 @@ impl Session {
         &self.name
     }
 
-    /// Determines which server is responsible for a specific key in a specific table.
-    fn get_server_for_key(&self, table_name: &str, key: u64) -> Option<&str> {
-        for partition in &self.partition_info {
-            if partition.table_name == table_name
-                && key >= partition.start_key
-                && key < partition.end_key
-            {
-                return Some(&partition.server_address);
+    /// Determines which replica is responsible for a specific key in a specific table.
+    fn get_replica_for_key(&self, table_name: &str, key: u64) -> Option<usize> {
+        if let Some(ranges) = self.partition_map.get(table_name) {
+            for &(start_key, end_key, replica_id) in ranges {
+                if key >= start_key && key < end_key {
+                    return Some(replica_id);
+                }
             }
         }
         None
@@ -132,7 +198,7 @@ impl Session {
 
     /// Adds an operation to the current command.
     ///
-    /// Routes the operation to the appropriate server based on the keys involved.
+    /// Routes the operation to the appropriate replica based on the keys involved.
     /// Handles both single (PUT, GET, DELETE, SWAP) operations and SCAN operations
     /// that may span multiple partitions.
     ///
@@ -174,16 +240,9 @@ impl Session {
     fn add_single_key_operation(&mut self, op_name: &str, args: &[String]) -> Result<()> {
         let (table_name, key) = extract_key(&args[0]).map_err(|e| anyhow::anyhow!(e))?;
 
-        let server_addr = self
-            .get_server_for_key(&table_name, key)
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No partition server found for table: {}, key: {}",
-                    table_name,
-                    key
-                )
-            })?;
+        let replica_id = self.get_replica_for_key(&table_name, key).ok_or_else(|| {
+            anyhow::anyhow!("No replica found for table: {}, key: {}", table_name, key)
+        })?;
 
         let id = self.next_op_id.unwrap();
         self.next_op_id = Some(id + 1);
@@ -194,9 +253,9 @@ impl Session {
             args: args.to_vec(),
         };
 
-        // Add the operation to the command for this specific server
+        // Add the operation to the command for this specific replica
         let cmds = self.cmds.as_mut().unwrap();
-        let cmd = cmds.entry(server_addr).or_insert_with(|| Command {
+        let cmd = cmds.entry(replica_id).or_insert_with(|| Command {
             cmd_id: CommandId::INVALID.into(),
             ops: vec![],
         });
@@ -225,51 +284,45 @@ impl Session {
         let id = self.next_op_id.unwrap();
         self.next_op_id = Some(id + 1);
 
-        // Track if we've added the operation to at least one server
-        let mut added_to_any_server = false;
+        // Track if we've added the operation to at least one replica
+        let mut added_to_any_replica = false;
         let cmds = self.cmds.as_mut().unwrap();
 
-        // Filter to only relevant partitions for this table
-        let relevant_partitions: Vec<&PartitionInfo> = self
-            .partition_info
-            .iter()
-            .filter(|p| p.table_name == table_name)
-            .collect();
+        // Get all ranges for this table
+        if let Some(ranges) = self.partition_map.get(&table_name) {
+            // For each key range in this table
+            for &(range_start, range_end, replica_id) in ranges {
+                // Check if scan range overlaps with this range
+                if !(end_key < range_start || start_key >= range_end) {
+                    // Calculate effective range for this partition (intersection of request and partition range)
+                    let effective_start = start_key.max(range_start);
+                    let effective_end = end_key.min(range_end - 1);
 
-        for partition in relevant_partitions {
-            // Check if scan range overlaps with this partition
-            if !(end_key < partition.start_key || start_key >= partition.end_key) {
-                added_to_any_server = true;
+                    // Create scan arguments for this partition
+                    let scan_args = vec![
+                        form_key(&table_name, effective_start, key_len),
+                        form_key(&table_name, effective_end, key_len),
+                    ];
 
-                // Calculate effective range for this partition (intersection of request and partition range)
-                let effective_start = start_key.max(partition.start_key);
-                let effective_end = end_key.min(partition.end_key - 1);
+                    let op = Operation {
+                        id,
+                        name: "SCAN".to_string(),
+                        args: scan_args,
+                    };
 
-                // Create scan arguments for this partition
-                let scan_args = vec![
-                    form_key(&table_name, effective_start, key_len),
-                    form_key(&table_name, effective_end, key_len),
-                ];
-
-                let op = Operation {
-                    id,
-                    name: "SCAN".to_string(),
-                    args: scan_args,
-                };
-
-                // Add the operation to this partition's server
-                let cmd = cmds
-                    .entry(partition.server_address.clone())
-                    .or_insert_with(|| Command {
+                    // Add the operation to this replica's command
+                    let cmd = cmds.entry(replica_id).or_insert_with(|| Command {
                         cmd_id: CommandId::INVALID.into(),
                         ops: vec![],
                     });
 
-                cmd.ops.push(op);
+                    cmd.ops.push(op);
+                    added_to_any_replica = true;
+                }
             }
         }
 
-        if !added_to_any_server {
+        if !added_to_any_replica {
             bail!(
                 "Scan range does not overlap with any partition for table: {}",
                 table_name
@@ -279,13 +332,7 @@ impl Session {
         Ok(())
     }
 
-    /// Finishes the current command and executes it on all relevant servers.
-    ///
-    /// This implementation optimizes command execution by sending all commands
-    /// to their respective servers first, then collecting results.
-    ///
-    /// If no existing command builder previously created by [`new_command`](Self::new_command)
-    /// exists, returns an error.
+    /// Finishes the current command and executes it on all relevant replicas.
     pub async fn finish_command(&mut self) -> Result<Vec<CommandResult>> {
         let Some(cmds) = self.cmds.take() else {
             bail!("No command in progress");
@@ -294,116 +341,270 @@ impl Session {
         self.next_op_id = None;
 
         match &mut self.client {
-            Client::Remote { txs, rxs } => {
-                execute_remote_commands(cmds, &self.name, txs, rxs).await
-            }
-
-            Client::DryRun => execute_dry_run_commands(cmds, &self.name),
+            Client::Remote { .. } => self.execute_remote_commands(cmds).await,
+            Client::DryRun => Self::execute_dry_run_commands(cmds, &self.name),
         }
     }
-}
 
-/// Execute commands on remote servers
-async fn execute_remote_commands(
-    cmds: HashMap<String, Command>,
-    session_name: &str,
-    txs: &mut HashMap<String, mpsc::Sender<Command>>,
-    rxs: &mut HashMap<String, Streaming<CommandResult>>,
-) -> Result<Vec<CommandResult>> {
-    let mut results = Vec::new();
+    /// Execute commands on remote servers with transparent leader switching
+    async fn execute_remote_commands(
+        &mut self,
+        cmds: HashMap<usize, Command>,
+    ) -> Result<Vec<CommandResult>> {
+        let mut results = Vec::new();
 
-    for (server_addr, cmd) in cmds {
-        // Skip empty commands
-        if cmd.ops.is_empty() {
-            continue;
-        }
-
-        loop {
-            // Send command to server
-            let tx = txs
-                .get(&server_addr)
-                .with_context(|| format!("No tx for server: {}", server_addr))?;
-
-            if let Err(send_err) = tx.send(cmd.clone()).await {
-                debug!(
-                    "Failed to send command to server: {}, error: {}. Reconnecting...",
-                    server_addr, send_err
-                );
-
-                // Connection broken, try to reconnect
-                connect_to_server(&server_addr, session_name, txs, rxs)
-                    .await
-                    .with_context(|| format!("Failed to reconnect to server: {}", server_addr))?;
+        // Process each command for each replica
+        for (replica_id, cmd) in cmds {
+            // Skip empty commands
+            if cmd.ops.is_empty() {
                 continue;
             }
 
-            // Receive the result
-            let rx = rxs
-                .get_mut(&server_addr)
-                .with_context(|| format!("No rx for server: {}", server_addr))?;
+            results.extend(self.execute_command_on_replica(replica_id, cmd).await?);
+        }
 
-            match rx.next().await {
+        Ok(results)
+    }
+
+    /// Execute a single command on a specific replica with retries
+    async fn execute_command_on_replica(
+        &mut self,
+        replica_id: usize,
+        cmd: Command,
+    ) -> Result<Vec<CommandResult>> {
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 3;
+
+        // Loop until we succeed or exhaust retries
+        loop {
+            // Get server information needed for this attempt
+            let (tx, server_name) = self.get_replica_tx_and_server(replica_id)?;
+
+            // Send command to the server
+            if let Err(send_err) = tx.send(cmd.clone()).await {
+                warn!(
+                    "Failed to send command to server: {}, error: {}. Attempting reconnect...",
+                    server_name, send_err
+                );
+
+                // Try switching to another server
+                self.try_next_server_in_replica(replica_id).await?;
+                continue;
+            }
+
+            // Get the replica's receiver to receive results
+            let rx_opt = self.get_replica_rx(replica_id)?;
+
+            // Wait for result
+            match rx_opt.next().await {
                 Some(Ok(result)) => {
-                    results.push(result);
-                    break;
+                    // Check if we need to switch to a different leader
+                    if result.status == Status::Leaderswitch.into() {
+                        if retry_count >= MAX_RETRIES {
+                            bail!("Max retries exceeded for leader switch");
+                        }
+                        retry_count += 1;
+
+                        // Get the new leader address from result content
+                        if !result.content.is_empty() {
+                            // Try to switch to the specified leader
+                            let new_server = result.content.clone();
+                            match self.try_connect_to_server(replica_id, &new_server).await {
+                                Ok(()) => {
+                                    info!(
+                                        "Switched to new leader: {} for replica {}",
+                                        new_server, replica_id
+                                    );
+                                    continue; // Try again with new leader
+                                }
+                                Err(e) => {
+                                    warn!("Failed to switch to leader {}: {}", new_server, e);
+                                    // Try another server in the replica
+                                    self.try_next_server_in_replica(replica_id).await?;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // No leader specified, try another server
+                            self.try_next_server_in_replica(replica_id).await?;
+                            continue;
+                        }
+                    }
+
+                    // Success!
+                    return Ok(vec![result]);
                 }
                 Some(Err(e)) => {
-                    debug!(
+                    warn!(
                         "Error receiving result from server: {}, error: {}. Reconnecting...",
-                        server_addr, e
+                        server_name, e
                     );
 
-                    connect_to_server(&server_addr, session_name, txs, rxs)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to reconnect to server: {}", server_addr)
-                        })?;
+                    self.try_next_server_in_replica(replica_id).await?;
+                    continue;
                 }
                 None => {
-                    debug!(
+                    warn!(
                         "Connection to server {} closed. Reconnecting...",
-                        server_addr
+                        server_name
                     );
 
-                    connect_to_server(&server_addr, session_name, txs, rxs)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to reconnect to server: {}", server_addr)
-                        })?;
+                    self.try_next_server_in_replica(replica_id).await?;
+                    continue;
                 }
             }
         }
     }
 
-    Ok(results)
-}
-
-/// Execute commands in dry run mode
-fn execute_dry_run_commands(
-    cmds: HashMap<String, Command>,
-    session_name: &str,
-) -> Result<Vec<CommandResult>> {
-    let mut results = Vec::new();
-
-    for (server_addr, cmd) in cmds {
-        if cmd.ops.is_empty() {
-            continue;
+    /// Get the tx sender for a replica
+    fn get_replica_tx_and_server(
+        &self,
+        replica_id: usize,
+    ) -> Result<(mpsc::Sender<Command>, String)> {
+        match &self.client {
+            Client::Remote { replicas } => {
+                if let Some(replica) = replicas.get(&replica_id) {
+                    Ok((replica.tx.clone(), replica.connected_server.clone()))
+                } else {
+                    bail!("No replica found with ID: {}", replica_id)
+                }
+            }
+            Client::DryRun => bail!("Not connected to remote servers"),
         }
-
-        println!("[{}] Command on server {}", session_name, server_addr);
-        for op in &cmd.ops {
-            println!("\t{} {:?}", op.name, op.args);
-        }
-        println!();
-
-        results.push(CommandResult {
-            status: Status::Committed.into(),
-            content: format!("dry-run on server {}", server_addr),
-            ..Default::default()
-        });
     }
 
-    Ok(results)
+    /// Get the rx receiver for a replica
+    fn get_replica_rx(&mut self, replica_id: usize) -> Result<&mut Streaming<CommandResult>> {
+        match &mut self.client {
+            Client::Remote { replicas } => {
+                if let Some(replica) = replicas.get_mut(&replica_id) {
+                    Ok(&mut replica.rx)
+                } else {
+                    bail!("No replica found with ID: {}", replica_id)
+                }
+            }
+            Client::DryRun => bail!("Not connected to remote servers"),
+        }
+    }
+
+    /// Try to connect to a specific server in the replica group
+    async fn try_connect_to_server(&mut self, replica_id: usize, server_addr: &str) -> Result<()> {
+        // First get servers list without holding the borrow
+        let servers = match &self.client {
+            Client::Remote { replicas } => {
+                if let Some(replica) = replicas.get(&replica_id) {
+                    replica.servers.clone()
+                } else {
+                    bail!("No replica found with ID: {}", replica_id)
+                }
+            }
+            Client::DryRun => bail!("Not connected to remote servers"),
+        };
+
+        // Check if the server is in this replica group
+        if !servers.contains(&server_addr.to_string()) {
+            bail!(
+                "Server {} is not in replica group {}",
+                server_addr,
+                replica_id
+            );
+        }
+
+        // Check if we're already connected to this server
+        let already_connected = match &self.client {
+            Client::Remote { replicas } => {
+                if let Some(replica) = replicas.get(&replica_id) {
+                    replica.connected_server == server_addr
+                } else {
+                    false
+                }
+            }
+            Client::DryRun => false,
+        };
+
+        if already_connected {
+            return Ok(());
+        }
+
+        // Connect to the new server
+        let (tx, rx) = connect_to_server(server_addr, &self.name)
+            .await
+            .with_context(|| format!("Failed to connect to server: {}", server_addr))?;
+
+        // Update the replica with the new connection
+        match &mut self.client {
+            Client::Remote { replicas } => {
+                if let Some(replica) = replicas.get_mut(&replica_id) {
+                    replica.connected_server = server_addr.to_string();
+                    replica.tx = tx;
+                    replica.rx = rx;
+
+                    info!(
+                        "Switched connection for replica {} to server {}",
+                        replica_id, server_addr
+                    );
+                }
+            }
+            Client::DryRun => bail!("Not connected to remote servers"),
+        };
+
+        Ok(())
+    }
+
+    /// Try the next server in the replica group
+    async fn try_next_server_in_replica(&mut self, replica_id: usize) -> Result<()> {
+        // Get the next server to try without holding the borrow
+        let next_server = {
+            match &self.client {
+                Client::Remote { replicas } => {
+                    if let Some(replica) = replicas.get(&replica_id) {
+                        let current_idx = replica
+                            .servers
+                            .iter()
+                            .position(|s| s == &replica.connected_server)
+                            .unwrap_or(0);
+
+                        let next_idx = (current_idx + 1) % replica.servers.len();
+                        replica.servers[next_idx].clone()
+                    } else {
+                        bail!("No replica found with ID: {}", replica_id)
+                    }
+                }
+                Client::DryRun => bail!("Not connected to remote servers"),
+            }
+        };
+
+        // Try to switch to the next server
+        self.try_connect_to_server(replica_id, &next_server).await
+    }
+
+    /// Execute commands in dry run mode
+    fn execute_dry_run_commands(
+        cmds: HashMap<usize, Command>,
+        session_name: &str,
+    ) -> Result<Vec<CommandResult>> {
+        let mut results = Vec::new();
+
+        for (replica_id, cmd) in cmds {
+            if cmd.ops.is_empty() {
+                continue;
+            }
+
+            println!("[{}] Command on replica {}", session_name, replica_id);
+            for op in &cmd.ops {
+                println!("\t{} {:?}", op.name, op.args);
+            }
+            println!();
+
+            results.push(CommandResult {
+                status: Status::Committed.into(),
+                content: format!("dry-run on replica {}", replica_id),
+                ..Default::default()
+            });
+        }
+
+        Ok(results)
+    }
 }
 
 /// Connect to the manager service with retries
@@ -431,13 +632,11 @@ async fn connect_to_manager(
 }
 
 /// Establishes a connection to a server and sets up the executor stream.
-/// This function handles connection retries.
+/// Returns the command sender and result receiver.
 async fn connect_to_server(
     server_address: &str,
-    name: &str,
-    txs: &mut HashMap<String, mpsc::Sender<Command>>,
-    rxs: &mut HashMap<String, Streaming<CommandResult>>,
-) -> Result<()> {
+    session_name: &str,
+) -> Result<(mpsc::Sender<Command>, Streaming<CommandResult>)> {
     let server_addr = if !server_address.starts_with("http") {
         format!("http://{}", server_address)
     } else {
@@ -461,9 +660,10 @@ async fn connect_to_server(
     let (tx, rx) = mpsc::channel(100);
 
     let mut request = Request::new(ReceiverStream::new(rx));
-    request
-        .metadata_mut()
-        .insert(metadata::SESSION_NAME, FromStr::from_str(name).unwrap());
+    request.metadata_mut().insert(
+        metadata::SESSION_NAME,
+        FromStr::from_str(session_name).unwrap(),
+    );
 
     let rx = db
         .connect_executor(request)
@@ -471,8 +671,5 @@ async fn connect_to_server(
         .with_context(|| format!("Failed to connect executor for server: {}", server_address))?
         .into_inner();
 
-    txs.insert(server_address.to_string(), tx);
-    rxs.insert(server_address.to_string(), rx);
-
-    Ok(())
+    Ok((tx, rx))
 }

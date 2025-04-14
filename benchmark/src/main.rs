@@ -177,6 +177,7 @@ fn handle_single_command_result(cmd_result: &CommandResult) -> Result<String, St
             }
             Ok(cmd_result.ops[0].content.to_owned())
         }
+        Status::Leaderswitch => unreachable!(),
     }
 }
 

@@ -46,4 +46,5 @@ message OperationResult {
 enum Status {
   ABORTED = 0;
   COMMITTED = 1;
+  LEADERSWITCH = 2;
 }
