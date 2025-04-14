@@ -36,7 +36,7 @@ impl RaftSession {
         raft_session
     }
 
-    /// Establish connection to a specific peer
+    /// Establish connection to a specific peer with automatic retry
     async fn connect_to_peer(
         &mut self,
         peer_id: u32,
@@ -50,15 +50,20 @@ impl RaftSession {
             addr
         };
 
-        match RaftClient::connect(addr).await {
-            Ok(client) => {
-                info!("Connected to peer {}", peer_id);
-                self.sessions.insert(peer_id, client);
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to connect to peer {}: {}", peer_id, e);
-                Err(Box::new(e))
+        loop {
+            match RaftClient::connect(addr.clone()).await {
+                Ok(client) => {
+                    info!("Connected to peer {}", peer_id);
+                    self.sessions.insert(peer_id, client);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to peer {}: {}. Retrying connection in 1 second",
+                        peer_id, e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
             }
         }
     }
