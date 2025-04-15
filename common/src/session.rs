@@ -28,8 +28,8 @@ struct ReplicaGroup {
 enum Client {
     /// Connected to remote servers
     Remote {
-        /// Map of replica IDs to ReplicaGroup
-        replicas: HashMap<usize, ReplicaGroup>,
+        /// Map of partition IDs to ReplicaGroup
+        partitions: HashMap<usize, ReplicaGroup>,
     },
     /// Dry run mode for testing/debugging
     DryRun,
@@ -67,53 +67,55 @@ impl Session {
         debug!("Got partition info: {partition_info:#?}");
 
         // Organize partitions by ranges and extract unique replica IDs
+        // Here partition == replica group
         let mut partition_map: HashMap<String, HashSet<(u64, u64, usize)>> = HashMap::new();
-        let mut replicas_by_id: HashMap<usize, Vec<PartitionInfo>> = HashMap::new();
-        let mut next_replica_id = 0;
+        let mut partition_by_id: HashMap<usize, Vec<PartitionInfo>> = HashMap::new();
+        let mut next_partition_id = 0;
         let mut key_ranges: HashMap<(String, u64, u64), usize> = HashMap::new();
 
-        // First pass: identify unique key ranges and assign replica IDs
-        for partition in &partition_info {
+        // First pass: identify unique key ranges and assign partition IDs
+        for partition_replica in &partition_info {
             let key = (
-                partition.table_name.clone(),
-                partition.start_key,
-                partition.end_key,
+                partition_replica.table_name.clone(),
+                partition_replica.start_key,
+                partition_replica.end_key,
             );
 
-            // If this key range doesn't have a replica ID yet, assign one
+            // If this key range doesn't have a partition ID yet, assign one
             if !key_ranges.contains_key(&key) {
-                key_ranges.insert(key.clone(), next_replica_id);
-                next_replica_id += 1;
+                key_ranges.insert(key.clone(), next_partition_id);
+                next_partition_id += 1;
             }
 
-            let replica_id = *key_ranges.get(&key).unwrap();
+            let partition_id = *key_ranges.get(&key).unwrap();
 
-            // Add to replicas_by_id for connection setup
-            replicas_by_id
-                .entry(replica_id)
+            // Add to partition_by_id for connection setup
+            // format: partition_id -> replica_group
+            partition_by_id
+                .entry(partition_id)
                 .or_insert_with(Vec::new)
-                .push(partition.clone());
+                .push(partition_replica.clone());
 
             // Add to partition_map for lookup
             partition_map
                 .entry(key.0.clone())
                 .or_insert_with(|| HashSet::new())
-                .insert((key.1, key.2, replica_id));
+                .insert((key.1, key.2, partition_id));
         }
 
         debug!("Create partition map {partition_map:?}");
 
         // For each replica group, connect to one server
-        let mut replicas = HashMap::new();
-        for (replica_id, partitions) in &replicas_by_id {
-            if partitions.is_empty() {
+        let mut partitions = HashMap::new();
+        for (partition_id, partition_replicas) in &partition_by_id {
+            if partition_replicas.is_empty() {
                 continue;
             }
 
             // Get all unique servers in this replica group
             let mut servers_set = std::collections::HashSet::new();
-            for partition in partitions {
-                servers_set.insert(partition.server_address.clone());
+            for partition_replica in partition_replicas {
+                servers_set.insert(partition_replica.server_address.clone());
             }
 
             let servers: Vec<String> = servers_set.into_iter().collect();
@@ -128,7 +130,7 @@ impl Session {
                 .await
                 .with_context(|| format!("Failed to connect to server: {}", connected_server))?;
 
-            debug!("Connect to server: {connected_server} replica: {replica_id}");
+            debug!("Connect to server: {connected_server} partition: {partition_id}");
             // Create replica group
             let replica_group = ReplicaGroup {
                 servers,
@@ -137,11 +139,11 @@ impl Session {
                 rx,
             };
 
-            replicas.insert(*replica_id, replica_group);
+            partitions.insert(*partition_id, replica_group);
         }
 
         Ok(Self {
-            client: Client::Remote { replicas },
+            client: Client::Remote { partitions },
             cmds: None,
             name: name.to_owned(),
             partition_map,
@@ -357,22 +359,22 @@ impl Session {
         let mut results = Vec::new();
 
         // Process each command for each replica
-        for (replica_id, cmd) in cmds {
+        for (partition_id, cmd) in cmds {
             // Skip empty commands
             if cmd.ops.is_empty() {
                 continue;
             }
 
-            results.extend(self.execute_command_on_replica(replica_id, cmd).await?);
+            results.extend(self.execute_command_on_partition(partition_id, cmd).await?);
         }
 
         Ok(results)
     }
 
-    /// Execute a single command on a specific replica with retries
-    async fn execute_command_on_replica(
+    /// Execute a single command on a specific partition with retries
+    async fn execute_command_on_partition(
         &mut self,
-        replica_id: usize,
+        partition_id: usize,
         cmd: Command,
     ) -> Result<Vec<CommandResult>> {
         let mut retry_count = 0;
@@ -381,7 +383,7 @@ impl Session {
         // Loop until we succeed or exhaust retries
         loop {
             // Get server information needed for this attempt
-            let (tx, server_name) = self.get_replica_tx_and_server(replica_id)?;
+            let (tx, server_name) = self.get_partition_tx_and_server(partition_id)?;
 
             // Send command to the server
             if let Err(send_err) = tx.send(cmd.clone()).await {
@@ -391,12 +393,12 @@ impl Session {
                 );
 
                 // Try switching to another server
-                self.try_next_server_in_replica(replica_id).await?;
+                self.try_next_server_in_partition(partition_id).await?;
                 continue;
             }
 
-            // Get the replica's receiver to receive results
-            let rx_opt = self.get_replica_rx(replica_id)?;
+            // Get the partition's receiver to receive results
+            let rx_opt = self.get_partition_rx(partition_id)?;
 
             // Wait for result
             match rx_opt.next().await {
@@ -412,24 +414,24 @@ impl Session {
                         if !result.content.is_empty() {
                             // Try to switch to the specified leader
                             let new_server = result.content.clone();
-                            match self.try_connect_to_server(replica_id, &new_server).await {
+                            match self.try_connect_to_server(partition_id, &new_server).await {
                                 Ok(()) => {
                                     info!(
-                                        "Switched to new leader: {} for replica {}",
-                                        new_server, replica_id
+                                        "Switched to new leader: {} for partition {}",
+                                        new_server, partition_id
                                     );
                                     continue; // Try again with new leader
                                 }
                                 Err(e) => {
                                     warn!("Failed to switch to leader {}: {}", new_server, e);
-                                    // Try another server in the replica
-                                    self.try_next_server_in_replica(replica_id).await?;
+                                    // Try another server in the partition
+                                    self.try_next_server_in_partition(partition_id).await?;
                                     continue;
                                 }
                             }
                         } else {
                             // No leader specified, try another server
-                            self.try_next_server_in_replica(replica_id).await?;
+                            self.try_next_server_in_partition(partition_id).await?;
                             continue;
                         }
                     }
@@ -443,7 +445,7 @@ impl Session {
                         server_name, e
                     );
 
-                    self.try_next_server_in_replica(replica_id).await?;
+                    self.try_next_server_in_partition(partition_id).await?;
                     continue;
                 }
                 None => {
@@ -452,38 +454,38 @@ impl Session {
                         server_name
                     );
 
-                    self.try_next_server_in_replica(replica_id).await?;
+                    self.try_next_server_in_partition(partition_id).await?;
                     continue;
                 }
             }
         }
     }
 
-    /// Get the tx sender for a replica
-    fn get_replica_tx_and_server(
+    /// Get the tx sender for a partition
+    fn get_partition_tx_and_server(
         &self,
-        replica_id: usize,
+        partition_id: usize,
     ) -> Result<(mpsc::Sender<Command>, String)> {
         match &self.client {
-            Client::Remote { replicas } => {
-                if let Some(replica) = replicas.get(&replica_id) {
-                    Ok((replica.tx.clone(), replica.connected_server.clone()))
+            Client::Remote { partitions } => {
+                if let Some(partition) = partitions.get(&partition_id) {
+                    Ok((partition.tx.clone(), partition.connected_server.clone()))
                 } else {
-                    bail!("No replica found with ID: {}", replica_id)
+                    bail!("No partition found with ID: {}", partition_id)
                 }
             }
             Client::DryRun => bail!("Not connected to remote servers"),
         }
     }
 
-    /// Get the rx receiver for a replica
-    fn get_replica_rx(&mut self, replica_id: usize) -> Result<&mut Streaming<CommandResult>> {
+    /// Get the rx receiver for a partition
+    fn get_partition_rx(&mut self, partition_id: usize) -> Result<&mut Streaming<CommandResult>> {
         match &mut self.client {
-            Client::Remote { replicas } => {
-                if let Some(replica) = replicas.get_mut(&replica_id) {
-                    Ok(&mut replica.rx)
+            Client::Remote { partitions } => {
+                if let Some(partition) = partitions.get_mut(&partition_id) {
+                    Ok(&mut partition.rx)
                 } else {
-                    bail!("No replica found with ID: {}", replica_id)
+                    bail!("No partition found with ID: {}", partition_id)
                 }
             }
             Client::DryRun => bail!("Not connected to remote servers"),
@@ -491,14 +493,14 @@ impl Session {
     }
 
     /// Try to connect to a specific server in the replica group
-    async fn try_connect_to_server(&mut self, replica_id: usize, server_addr: &str) -> Result<()> {
+    async fn try_connect_to_server(&mut self, partition_id: usize, server_addr: &str) -> Result<()> {
         // First get servers list without holding the borrow
         let servers = match &self.client {
-            Client::Remote { replicas } => {
-                if let Some(replica) = replicas.get(&replica_id) {
-                    replica.servers.clone()
+            Client::Remote { partitions } => {
+                if let Some(partition) = partitions.get(&partition_id) {
+                    partition.servers.clone()
                 } else {
-                    bail!("No replica found with ID: {}", replica_id)
+                    bail!("No partition found with ID: {}", partition_id)
                 }
             }
             Client::DryRun => bail!("Not connected to remote servers"),
@@ -507,17 +509,17 @@ impl Session {
         // Check if the server is in this replica group
         if !servers.contains(&server_addr.to_string()) {
             bail!(
-                "Server {} is not in replica group {}",
+                "Server {} is not in partition {}",
                 server_addr,
-                replica_id
+                partition_id
             );
         }
 
         // Check if we're already connected to this server
         let already_connected = match &self.client {
-            Client::Remote { replicas } => {
-                if let Some(replica) = replicas.get(&replica_id) {
-                    replica.connected_server == server_addr
+            Client::Remote { partitions } => {
+                if let Some(partition) = partitions.get(&partition_id) {
+                    partition.connected_server == server_addr
                 } else {
                     false
                 }
@@ -536,15 +538,15 @@ impl Session {
 
         // Update the replica with the new connection
         match &mut self.client {
-            Client::Remote { replicas } => {
-                if let Some(replica) = replicas.get_mut(&replica_id) {
-                    replica.connected_server = server_addr.to_string();
-                    replica.tx = tx;
-                    replica.rx = rx;
+            Client::Remote { partitions } => {
+                if let Some(partition) = partitions.get_mut(&partition_id) {
+                    partition.connected_server = server_addr.to_string();
+                    partition.tx = tx;
+                    partition.rx = rx;
 
                     info!(
-                        "Switched connection for replica {} to server {}",
-                        replica_id, server_addr
+                        "Switched connection for partition {} to server {}",
+                        partition_id, server_addr
                     );
                 }
             }
@@ -554,23 +556,23 @@ impl Session {
         Ok(())
     }
 
-    /// Try the next server in the replica group
-    async fn try_next_server_in_replica(&mut self, replica_id: usize) -> Result<()> {
+    /// Try the next server in the partition
+    async fn try_next_server_in_partition(&mut self, partition_id: usize) -> Result<()> {
         // Get the next server to try without holding the borrow
         let next_server = {
             match &self.client {
-                Client::Remote { replicas } => {
-                    if let Some(replica) = replicas.get(&replica_id) {
-                        let current_idx = replica
+                Client::Remote { partitions } => {
+                    if let Some(partition) = partitions.get(&partition_id) {
+                        let current_idx = partition
                             .servers
                             .iter()
-                            .position(|s| s == &replica.connected_server)
+                            .position(|s| s == &partition.connected_server)
                             .unwrap_or(0);
 
-                        let next_idx = (current_idx + 1) % replica.servers.len();
-                        replica.servers[next_idx].clone()
+                        let next_idx = (current_idx + 1) % partition.servers.len();
+                        partition.servers[next_idx].clone()
                     } else {
-                        bail!("No replica found with ID: {}", replica_id)
+                        bail!("No partition found with ID: {}", partition_id)
                     }
                 }
                 Client::DryRun => bail!("Not connected to remote servers"),
@@ -578,7 +580,7 @@ impl Session {
         };
 
         // Try to switch to the next server
-        self.try_connect_to_server(replica_id, &next_server).await
+        self.try_connect_to_server(partition_id, &next_server).await
     }
 
     /// Execute commands in dry run mode
@@ -588,12 +590,12 @@ impl Session {
     ) -> Result<Vec<CommandResult>> {
         let mut results = Vec::new();
 
-        for (replica_id, cmd) in cmds {
+        for (partition_id, cmd) in cmds {
             if cmd.ops.is_empty() {
                 continue;
             }
 
-            println!("[{}] Command on replica {}", session_name, replica_id);
+            println!("[{}] Command on partition {}", session_name, partition_id);
             for op in &cmd.ops {
                 println!("\t{} {:?}", op.name, op.args);
             }
@@ -601,7 +603,7 @@ impl Session {
 
             results.push(CommandResult {
                 status: Status::Committed.into(),
-                content: format!("dry-run on replica {}", replica_id),
+                content: format!("dry-run on partition {}", partition_id),
                 ..Default::default()
             });
         }
