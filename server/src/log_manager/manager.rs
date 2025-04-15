@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::log_manager::comm::{ElectionResult, LogManagerMessage};
+use crate::log_manager::persistent_states::PersistentStateManager;
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::raft_session::RaftSession;
 use crate::log_manager::storage::RaftLog;
@@ -59,10 +60,6 @@ pub struct LogManager {
 
     /// Current state in the Raft consensus algorithm (Leader/Follower/Candidate)
     current_state: NodeState,
-    /// Current term number (monotonically increasing)
-    current_term: u64,
-    /// Node ID this node voted for in the current term (if any)
-    voted_for: Option<u32>,
 
     /// Highest log entry known to be committed
     commit_index: u64,
@@ -79,6 +76,9 @@ pub struct LogManager {
 
     /// Election result - shared between the main loop and election task
     election_result: Arc<Mutex<Option<ElectionResult>>>,
+
+    /// Manager for persistent Raft state
+    persistent_state: PersistentStateManager,
 }
 
 impl LogManager {
@@ -157,6 +157,20 @@ impl LogManager {
         // Initialize with no election result
         let election_result = Arc::new(Mutex::new(None));
 
+        // Initialize persistent state manager
+        let persistent_state = match PersistentStateManager::new(config.persistent_state_path.as_ref().map_or_else(|| Path::new("raft_state"), |p| p.as_path())) {
+            Ok(state_manager) => {
+                let state = state_manager.get_state();
+                info!("Loaded persistent state: term={}, voted_for={:?}", 
+                      state.current_term, state.voted_for);
+                state_manager
+            },
+            Err(e) => {
+                error!("Failed to initialize persistent state manager: {}", e);
+                PersistentStateManager::default()
+            }
+        };
+
         LogManager {
             log,
             executor_rx,
@@ -170,14 +184,13 @@ impl LogManager {
                 leader_id: 0,
                 leader_addr: "TODO".to_string(),
             },
-            current_term: 0,
-            voted_for: None,
             commit_index: 0,
             last_applied: 0,
             last_heartbeat: Instant::now(),
             election_timeout: Duration::from_millis(300 + rand::random::<u64>() % 200),
             raft_request_incoming_rx,
             election_result,
+            persistent_state,
         }
     }
 
@@ -252,11 +265,11 @@ impl LogManager {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
                                     // If we receive an AppendEntries with term >= our term,
                                     // we should revert to follower
-                                    if request.term >= self.current_term {
+                                    if request.term >= self.persistent_state.get_state().current_term {
                                         info!("Received AppendEntries from leader with term >= our term. Reverting to follower.");
-                                        // TODO: persist currentTerm, voteFor
-                                        self.current_term = request.term;
-                                        self.voted_for = None;
+                                        if let Err(e) = self.persistent_state.update_term_and_vote(request.term, None) {
+                                            error!("Failed to persist term and vote update: {}", e);
+                                        }
                                         self.current_state = NodeState::Follower {
                                             leader_id: request.leader_id,
                                             leader_addr: self.peers.get(&request.leader_id)
@@ -269,7 +282,7 @@ impl LogManager {
                                     } else {
                                         // Reject AppendEntries from outdated leader
                                         let response = AppendEntriesResponse {
-                                            term: self.current_term,
+                                            term: self.persistent_state.get_state().current_term,
                                             success: false,
                                         };
                                         if oneshot_tx.send(response).is_err() {
@@ -291,7 +304,7 @@ impl LogManager {
                             // Periodically check if we've won the election
                             if let Some(vote_result) = self.check_election_result() {
                                 if vote_result {
-                                    info!("Won election for term {}. Becoming leader.", self.current_term);
+                                    info!("Won election for term {}. Becoming leader.", self.persistent_state.get_state().current_term);
                                     self.become_leader().await;
                                 }
                             }
@@ -321,7 +334,7 @@ impl LogManager {
                 info!("Received client request {:?}", cmd_id);
 
                 // Generate log entry
-                let term = self.current_term;
+                let term = self.persistent_state.get_state().current_term;
                 let last_index = self.log.get_last_index();
                 let index = last_index + 1;
 
@@ -392,7 +405,7 @@ impl LogManager {
                     };
 
                     let append_request = AppendEntriesRequest {
-                        term: self.current_term,
+                        term: self.persistent_state.get_state().current_term,
                         leader_id: self.node_id.0,
                         prev_log_index,
                         prev_log_term,
@@ -402,7 +415,6 @@ impl LogManager {
 
                     // Clone the session for the spawned task
                     let raft_session = Arc::clone(&self.raft_session);
-                    let current_term = self.current_term;
                     let entry_index = index;
 
                     // Spawn a task to handle replication
@@ -452,7 +464,7 @@ impl LogManager {
         // Create a heartbeat request (empty AppendEntries)
         let heartbeat_request = AppendEntriesRequest {
             leader_id: self.node_id.0,
-            term: self.current_term,
+            term: self.persistent_state.get_state().current_term,
             prev_log_index: last_log_index,
             prev_log_term: last_log_term,
             entries: vec![], // Empty for heartbeat
@@ -486,22 +498,22 @@ impl LogManager {
         let mut success = true;
 
         // 1. Term Verification and Update
-        if request.term < self.current_term {
+        if request.term < self.persistent_state.get_state().current_term {
             // Reject heartbeat from outdated leader
             debug!(
                 "Rejecting heartbeat from outdated leader (term {} < our term {})",
-                request.term, self.current_term
+                request.term, self.persistent_state.get_state().current_term
             );
             success = false;
-        } else if request.term > self.current_term {
+        } else if request.term > self.persistent_state.get_state().current_term {
             // Update follower's term if leader's term is higher
             debug!(
                 "Updating term from {} to {}",
-                self.current_term, request.term
+                self.persistent_state.get_state().current_term, request.term
             );
-            // TODO: persist currentTerm, voteFor
-            self.current_term = request.term;
-            self.voted_for = None; // Reset vote when term changes
+            if let Err(e) = self.persistent_state.update_term_and_vote(request.term, None) {
+                error!("Failed to persist term and vote update: {}", e);
+            }
         }
 
         // 2. Log Consistency Check
@@ -571,7 +583,7 @@ impl LogManager {
 
         // 6. Send Response
         let response = AppendEntriesResponse {
-            term: self.current_term,
+            term: self.persistent_state.get_state().current_term,
             success,
         };
 
@@ -609,38 +621,36 @@ impl LogManager {
         info!(
             "[Node {}] Starting election for term {}",
             self.node_id.0,
-            self.current_term + 1
+            self.persistent_state.get_state().current_term + 1
         );
 
-        // 1. Increment current term
-        self.current_term += 1;
-        // TODO: persist currentTerm
+        // 1. Increment current term and vote for self atomically
+        let new_term = self.persistent_state.get_state().current_term + 1;
+        if let Err(e) = self.persistent_state.update_term_and_vote(new_term, Some(self.node_id.0)) {
+            error!("Failed to persist term and vote update: {}", e);
+        }
 
         // 2. Transition to candidate state
         self.current_state = NodeState::Candidate;
 
-        // 3. Vote for self
-        self.voted_for = Some(self.node_id.0);
-        // TODO: persist voteFor
-
-        // 4. Reset election timer with randomization
+        // 3. Reset election timer with randomization
         self.election_timeout = Duration::from_millis(300 + rand::random::<u64>() % 200);
         self.last_heartbeat = Instant::now();
 
-        // 5. Prepare RequestVote RPC
+        // 4. Prepare RequestVote RPC
         let last_log_index = self.log.get_last_index();
         let last_log_term = self.log.get_last_term();
 
         let request = RequestVoteRequest {
-            term: self.current_term,
+            term: self.persistent_state.get_state().current_term,
             candidate_id: self.node_id.0,
             last_log_index,
             last_log_term,
         };
 
-        // 6. Send RequestVote RPCs to all other servers
+        // 5. Send RequestVote RPCs to all other servers
         let raft_session = Arc::clone(&self.raft_session);
-        let current_term = self.current_term;
+        let current_term = self.persistent_state.get_state().current_term;
         let node_id = self.node_id.0;
         let election_result = Arc::clone(&self.election_result);
 
@@ -685,10 +695,10 @@ impl LogManager {
         let mut vote_granted = false;
 
         // If the candidate's term is greater than ours, update our term
-        if request.term > self.current_term {
-            // TODO: persist currentTerm, voteFor
-            self.current_term = request.term;
-            self.voted_for = None;
+        if request.term > self.persistent_state.get_state().current_term {
+            if let Err(e) = self.persistent_state.update_term_and_vote(request.term, None) {
+                error!("Failed to persist term and vote update: {}", e);
+            }
 
             // If we were a candidate or leader, revert to follower
             if !matches!(self.current_state, NodeState::Follower { .. }) {
@@ -700,10 +710,10 @@ impl LogManager {
         }
 
         // Decide whether to grant vote
-        if request.term < self.current_term {
+        if request.term < self.persistent_state.get_state().current_term {
             // Reject vote if candidate's term is outdated
             vote_granted = false;
-        } else if self.voted_for.is_none() || self.voted_for == Some(request.candidate_id) {
+        } else if self.persistent_state.get_state().voted_for.is_none() || self.persistent_state.get_state().voted_for == Some(request.candidate_id) {
             // Check if candidate's log is at least as up-to-date as ours
             let last_log_index = self.log.get_last_index();
             let last_log_term = self.log.get_last_term();
@@ -714,15 +724,16 @@ impl LogManager {
             {
                 // Grant vote
                 vote_granted = true;
-                self.voted_for = Some(request.candidate_id);
-                // TODO: persist voteFor
+                if let Err(e) = self.persistent_state.update_vote(Some(request.candidate_id)) {
+                    error!("Failed to persist vote update: {}", e);
+                }
                 self.last_heartbeat = Instant::now(); // Reset election timer
             }
         }
 
         // Send response
         let response = RequestVoteResponse {
-            term: self.current_term,
+            term: self.persistent_state.get_state().current_term,
             vote_granted,
         };
 
@@ -759,7 +770,7 @@ impl LogManager {
         if let Ok(guard) = self.election_result.try_lock() {
             if let Some(result) = *guard {
                 // Only accept results for the current term
-                if result.term == self.current_term {
+                if result.term == self.persistent_state.get_state().current_term {
                     return Some(result.won);
                 }
             }

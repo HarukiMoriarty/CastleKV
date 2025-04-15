@@ -23,6 +23,9 @@ pub struct ServerConfig {
     /// Directory path for log files
     pub log_path: Option<PathBuf>,
 
+    /// Directory path for persistent state files
+    pub persistent_state_path: Option<PathBuf>,
+
     /// Address of the manager node
     pub manager_addr: String,
 
@@ -56,6 +59,7 @@ impl Default for ServerConfig {
             peer_listen_addr: "0.0.0.0:25000".to_string(),
             db_path: None,
             log_path: None,
+            persistent_state_path: None,
             manager_addr: "0.0.0.0:24000".to_string(),
             peer_replica_addr: HashMap::new(),
             persistence_enabled: false,
@@ -117,6 +121,12 @@ impl ServerConfigBuilder {
     /// Set the persistent log path
     pub fn log_path(mut self, path: impl Into<Option<PathBuf>>) -> Self {
         self.config.log_path = path.into();
+        self
+    }
+
+    /// Set the persistent state path
+    pub fn persistent_state_path(mut self, path: impl Into<Option<PathBuf>>) -> Self {
+        self.config.persistent_state_path = path.into();
         self
     }
 

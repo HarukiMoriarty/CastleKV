@@ -33,6 +33,9 @@ struct Cli {
     #[arg(long, help = "Directory path for log files")]
     log_path: Option<PathBuf>,
 
+    #[arg(long, help = "Directory path for persistent state files")]
+    persistent_state_path: Option<PathBuf>,
+
     #[arg(long, default_value = "0.0.0.0:24000", help = "Address of the manager")]
     manager_addr: String,
 
@@ -101,6 +104,7 @@ impl From<Cli> for ServerConfig {
             .peer_listen_addr(cli.peer_listen_addr)
             .db_path(cli.db_path)
             .log_path(cli.log_path)
+            .persistent_state_path(cli.persistent_state_path)
             .manager_addr(cli.manager_addr)
             .peer_replica_addr(cli.peer_replica_addr)
             .persistence_enabled(cli.persistence)
