@@ -272,4 +272,13 @@ impl RaftLog {
             .cloned()
             .collect()
     }
+
+    /// Truncate the log from the given index onwards
+    pub fn truncate_from(&mut self, index: u64) -> io::Result<()> {
+        // Remove all entries from index onwards
+        self.entries.truncate(index as usize);
+        
+        // TODO: Also truncate the on-disk segments if needed
+        Ok(())
+    }
 }
