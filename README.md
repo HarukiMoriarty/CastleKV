@@ -42,10 +42,13 @@ cargo run --release --bin server -- [OPTIONS]
 #### Server Parameters
 
 - `--node-id <NODE_ID>`             Id of the current node [default: 0]
-- `--listen-addr <LISTEN_ADDR>`      The address to listen on [default: 0.0.0.0:23000]
-- `--db-path <DB_PATH>`              Directory path for database files
-- `--log-path <LOG_PATH>`            Directory path for log files, e.g. `log<NODE_ID>`
+- `--client-listen-addr <CLIENT_LISTEN_ADDR>`      The address to listen on for client requests [default: 0.0.0.0:23000]
+- `--db-path <DB_PATH>`              Directory path for database files, e.g. `data/db/node<NODE_ID>`
+- `--log-path <LOG_PATH>`            Directory path for log files, e.g. `data/log/node<NODE_ID>`
+- `--persistent-state-path <PERSISTENT_STATE_PATH>`  Directory path for persistent state files, e.g. `data/state/node<NODE_ID>`
 - `--manager-addr <MANAGER_ADDR>`    Address of the manager [default: 0.0.0.0:24000]
+- `--peer-replica-addr <PEER_REPLICA_ADDR>`  Address of the peer replicas
+- `--peer-listen-addr <PEER_LISTEN_ADDR>`  Address to listen on for peer replicas
 - `--persistence`                    Enable database persistence
 - `--batch-size <BATCH_SIZE>`        Batch size for write operations before flushing to disk
 - `--batch-timeout <BATCH_TIMEOUT>`  Timeout in milliseconds before a batch is flushed even if not full
@@ -61,6 +64,7 @@ cargo run --release --bin manager -- [OPTIONS]
 - `--listen-addr <LISTEN_ADDR>`  The address to listen on [default: 0.0.0.0:24000]
 - `--servers <SERVERS>`          Comma-separated list of server addresses
 - `--tables <TABLES>`            Table configurations in format: table1=1000000,table2=2000000
+- `--server-rf <SERVER_RF>`      Replication factor for the server [default: 3]
 
 ### Running the Client (Terminal Interaction)
 
