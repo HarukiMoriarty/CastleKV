@@ -6,7 +6,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Streaming};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::{extract_key, form_key, metadata, CommandId};
 use rpc::gateway::db_client::DbClient;
@@ -378,7 +378,7 @@ impl Session {
         cmd: Command,
     ) -> Result<Vec<CommandResult>> {
         let mut retry_count = 0;
-        const MAX_RETRIES: usize = 3;
+        const MAX_RETRIES: usize = 10;
 
         // Loop until we succeed or exhaust retries
         loop {
@@ -421,7 +421,7 @@ impl Session {
                                         .await
                                     {
                                         Ok(()) => {
-                                            info!(
+                                            debug!(
                                                 "Switched to new leader: replica {} for partition {}",
                                                 replica_id, partition_id
                                             );
@@ -564,7 +564,7 @@ impl Session {
                     partition.tx = tx;
                     partition.rx = rx;
 
-                    info!(
+                    debug!(
                         "Switched connection for partition {} to replica {} (server {})",
                         partition_id, replica_id, server_addr
                     );
