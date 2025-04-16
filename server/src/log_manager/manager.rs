@@ -432,8 +432,6 @@ impl LogManager {
                     let response_tx = self.append_entries_response_tx.clone();
 
                     // Spawn a task to handle replication
-                    let node_id = self.node_id.0;
-                    let current_term = self.persistent_state.get_state().current_term;
                     let peers = self.peers.clone();
 
                     tokio::spawn(async move {

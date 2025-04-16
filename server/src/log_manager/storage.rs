@@ -10,10 +10,6 @@ use rpc::raft::LogEntry;
 pub(crate) struct Segment {
     /// File handle for this segment
     file: File,
-    /// Path to this segment file
-    path: String,
-    /// Starting index of entries in this segment
-    start_index: u64,
 }
 
 impl Segment {
@@ -22,8 +18,7 @@ impl Segment {
     /// # Arguments
     ///
     /// * `path` - File path for the segment
-    /// * `start_index` - First log index in this segment
-    pub fn new(path: &str, start_index: u64) -> io::Result<Self> {
+    pub fn new(path: &str) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -31,8 +26,6 @@ impl Segment {
             .open(path)?;
         Ok(Segment {
             file,
-            path: path.to_string(),
-            start_index,
         })
     }
 
@@ -125,34 +118,13 @@ impl RaftLog {
         });
 
         let mut segments = Vec::new();
-        let mut last_index = 0;
 
         // Load existing segments
         for segment_path in &existing_segments {
             let path_str = segment_path.to_string_lossy();
-            // Extract segment number to determine start index
-            let segment_num = path_str
-                .split("segment_")
-                .nth(1)
-                .unwrap_or("0")
-                .split('.')
-                .next()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
 
             // For the first segment, start index is 1
-            // For others, we'll determine it from the previous segment's entries
-            let start_index = if segment_num == 0 { 1 } else { last_index + 1 };
-
-            let mut segment = Segment::new(&path_str, start_index)?;
-
-            // Load entries to determine the last index for the next segment
-            if let Ok(entries) = segment.load_entries() {
-                if let Some(last_entry) = entries.last() {
-                    last_index = last_entry.index;
-                }
-            }
+            let segment = Segment::new(&path_str)?;
 
             segments.push(segment);
         }
@@ -161,7 +133,7 @@ impl RaftLog {
         let current_segment = if segments.is_empty() {
             // No segments found, create a new one
             debug!("Creating initial log segment");
-            Segment::new(&format!("{}/raft_log_segment_0.log", base_path), 1)?
+            Segment::new(&format!("{}/raft_log_segment_0.log", base_path))?
         } else {
             // Use the last segment as current
             segments.pop().unwrap()
@@ -207,7 +179,7 @@ impl RaftLog {
 
             self.segments.push(std::mem::replace(
                 &mut self.current_segment,
-                Segment::new(&new_segment_path, entry.index)?,
+                Segment::new(&new_segment_path)?,
             ));
         }
 
@@ -262,15 +234,6 @@ impl RaftLog {
         // Find the entry with the matching index
         // This assumes entries are stored in order by index
         self.entries.iter().find(|entry| entry.index == index)
-    }
-    
-    /// Get all entries starting from a specific index
-    pub fn get_entries_from(&self, start_index: u64) -> Vec<LogEntry> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.index >= start_index)
-            .cloned()
-            .collect()
     }
 
     /// Truncate the log from the given index onwards
