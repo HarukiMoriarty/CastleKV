@@ -4,7 +4,7 @@
 
 This project implements a distributed key-value store for CS739 Distributed Systems at UW Madison. 
 
-It provides a scalable, partition-based architecture with support for basic key-value operations across multiple tables. The system features one-shot ACID transaction properties and is currently being extended to implement Raft consensus protocol for fault-tolerant replicas.
+It provides a scalable, partition-based architecture with support for basic key-value operations across multiple tables. The system features one-shot ACID transaction properties and supports Raft consensus protocol for fault-tolerant replicas.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ cargo run --release --bin manager -- [OPTIONS]
 #### Manager Parameters
 
 - `--listen-addr <LISTEN_ADDR>`  The address to listen on [default: 0.0.0.0:24000]
-- `--servers <SERVERS>`          Comma-separated list of server addresses
+- `--server_addrs <SERVERS>`          Comma-separated list of server addresses
 - `--tables <TABLES>`            Table configurations in format: table1=1000000,table2=2000000
 - `--server-rf <SERVER_RF>`      Replication factor for the server [default: 3]
 
@@ -99,9 +99,4 @@ The client provides an interactive terminal where you can:
  
 ## TODO List
 
-- [x] Implement log manager
-- [x] Add multi-table support with independent partitioning
-- [ ] Add support for replicas (Raft)
-- [x] Implement server recovery from log
-- [x] heartbeat mechanism for leader election
-- [ ] persist states {currentTerm, voteFor} and crash recovery
+- fix possible test bugs
