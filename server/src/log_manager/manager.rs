@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
@@ -14,7 +14,7 @@ use crate::log_manager::persistent_states::PersistentStateManager;
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::raft_session::RaftSession;
 use crate::log_manager::storage::RaftLog;
-use crate::log_manager::RaftRequestIncomingReceiver;
+use crate::log_manager::{AppendLogResult, RaftRequestIncomingReceiver};
 use crate::plan::Plan;
 use rpc::gateway::Command;
 use rpc::raft::{
@@ -81,8 +81,9 @@ pub struct LogManager {
     persistent_state: PersistentStateManager,
 
     /// Channel for receiving AppendEntries responses from spawned tasks
-    append_entries_response_rx: mpsc::Receiver<(String, AppendEntriesRequest, AppendEntriesResponse)>,
-    
+    append_entries_response_rx:
+        mpsc::Receiver<(String, AppendEntriesRequest, AppendEntriesResponse)>,
+
     /// Sender for AppendEntries responses (cloned and passed to spawned tasks)
     append_entries_response_tx: mpsc::Sender<(String, AppendEntriesRequest, AppendEntriesResponse)>,
 }
@@ -164,13 +165,20 @@ impl LogManager {
         let election_result = Arc::new(Mutex::new(None));
 
         // Initialize persistent state manager
-        let persistent_state = match PersistentStateManager::new(config.persistent_state_path.as_ref().map_or_else(|| Path::new("raft_state"), |p| p.as_path())) {
+        let persistent_state = match PersistentStateManager::new(
+            config
+                .persistent_state_path
+                .as_ref()
+                .map_or_else(|| Path::new("raft_state"), |p| p.as_path()),
+        ) {
             Ok(state_manager) => {
                 let state = state_manager.get_state();
-                info!("Loaded persistent state: term={}, voted_for={:?}", 
-                      state.current_term, state.voted_for);
+                info!(
+                    "Loaded persistent state: term={}, voted_for={:?}",
+                    state.current_term, state.voted_for
+                );
                 state_manager
-            },
+            }
             Err(e) => {
                 error!("Failed to initialize persistent state manager: {}", e);
                 PersistentStateManager::default()
@@ -178,7 +186,7 @@ impl LogManager {
         };
 
         // Create channel for AppendEntries responses
-        let (append_entries_response_tx, append_entries_response_rx) = 
+        let (append_entries_response_tx, append_entries_response_rx) =
             mpsc::channel::<(String, AppendEntriesRequest, AppendEntriesResponse)>(100);
 
         LogManager {
@@ -222,6 +230,7 @@ impl LogManager {
                 } => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
+                            debug!("Leader handle client message {:?}", msg);
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
@@ -250,6 +259,10 @@ impl LogManager {
                     leader_addr,
                 } => {
                     tokio::select! {
+                        Some(msg) = self.executor_rx.recv() => {
+                            debug!("Follower handle client message {:?}", msg);
+                            self.handle_client_request(msg).await;
+                        },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest {
@@ -276,6 +289,10 @@ impl LogManager {
                 }
                 NodeState::Candidate => {
                     tokio::select! {
+                        Some(msg) = self.executor_rx.recv() => {
+                            debug!("Candidate handle client message {:?}", msg);
+                            self.handle_client_request(msg).await;
+                        },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
@@ -319,7 +336,22 @@ impl LogManager {
                 // Only leader should handle this
                 if !matches!(self.current_state, NodeState::Leader { .. }) {
                     warn!("Received client request but not leader");
-                    let _ = resp_tx.send(0); // or use Result<u64, Err>
+
+                    // Check the specific non-leader state and respond accordingly
+                    match &self.current_state {
+                        NodeState::Follower {
+                            leader_id,
+                            leader_addr,
+                        } => {
+                            // For followers, return None and the leader's address
+                            let _ = resp_tx.send(AppendLogResult::LeaderSwitch(*leader_id));
+                        }
+                        NodeState::Candidate => {
+                            // For candidates, return None for both values
+                            let _ = resp_tx.send(AppendLogResult::LeaderUnSelected);
+                        }
+                        _ => unreachable!(), // This should not happen given the earlier check
+                    }
                     return;
                 }
                 info!("Received client request {:?}", cmd_id);
@@ -378,12 +410,16 @@ impl LogManager {
                 }
 
                 if !success {
-                    let _ = resp_tx.send(0);
+                    let _ = resp_tx.send(AppendLogResult::Failure);
                     return;
                 }
 
                 // Replicate to followers
-                if let NodeState::Leader { next_index, match_index } = &mut self.current_state {
+                if let NodeState::Leader {
+                    next_index,
+                    match_index,
+                } = &mut self.current_state
+                {
                     // Create AppendEntries request
                     let prev_log_index = index - 1;
                     let prev_log_term = if prev_log_index > 0 {
@@ -408,27 +444,39 @@ impl LogManager {
                     let raft_session = Arc::clone(&self.raft_session);
                     let entry_index = index;
                     let response_tx = self.append_entries_response_tx.clone();
-                    
+
                     // Spawn a task to handle replication
                     let node_id = self.node_id.0;
                     let current_term = self.persistent_state.get_state().current_term;
                     let peers = self.peers.clone();
 
                     tokio::spawn(async move {
-                        match RaftSession::broadcast_append_entries(raft_session, append_request.clone()).await {
+                        match RaftSession::broadcast_append_entries(
+                            raft_session,
+                            append_request.clone(),
+                        )
+                        .await
+                        {
                             Ok(responses) => {
                                 info!("Successfully replicated entry {} to majority", entry_index);
-                                
+
                                 // Send the response with the log index
-                                if resp_tx.send(entry_index).is_err() {
+                                if resp_tx.send(AppendLogResult::Success(entry_index)).is_err() {
                                     warn!("Failed to send log append response - receiver dropped");
                                 }
-                                
+
                                 // Process individual responses by sending them back to the main task
                                 for (peer_id, response) in responses {
                                     if let Some(peer_addr) = peers.get(&peer_id) {
                                         // Send response back to main task for processing
-                                        if let Err(e) = response_tx.send((peer_addr.clone(), append_request.clone(), response)).await {
+                                        if let Err(e) = response_tx
+                                            .send((
+                                                peer_addr.clone(),
+                                                append_request.clone(),
+                                                response,
+                                            ))
+                                            .await
+                                        {
                                             error!("Failed to send AppendEntries response to main task: {}", e);
                                         }
                                     }
@@ -437,7 +485,7 @@ impl LogManager {
                             Err(e) => {
                                 error!("Failed to replicate entry to majority: {}", e);
                                 // Send failure response
-                                if resp_tx.send(0).is_err() {
+                                if resp_tx.send(AppendLogResult::Failure).is_err() {
                                     warn!("Failed to send log append failure response - receiver dropped");
                                 }
                             }
@@ -452,9 +500,6 @@ impl LogManager {
                             // We don't update match_index yet - that happens when we get successful responses
                         }
                     }
-                } else {
-                    // This shouldn't happen due to the earlier check, but just in case
-                    let _ = resp_tx.send(0);
                 }
             }
         }
@@ -462,7 +507,7 @@ impl LogManager {
 
     /// Send heartbeats to all followers
     async fn send_heartbeats(&self) {
-        debug!("Sending heartbeat to followers");
+        trace!("Sending heartbeat to followers");
 
         // For each follower, prepare and send AppendEntries
         let last_log_index = self.log.get_last_index();
@@ -484,7 +529,7 @@ impl LogManager {
         tokio::spawn(async move {
             match RaftSession::broadcast_append_entries(raft_session, heartbeat_request).await {
                 Ok(responses) => {
-                    debug!(
+                    trace!(
                         "Received {} successful heartbeat responses",
                         responses.len()
                     );
@@ -501,12 +546,15 @@ impl LogManager {
         request: AppendEntriesRequest,
         oneshot_tx: oneshot::Sender<AppendEntriesResponse>,
     ) {
-        debug!("Received append entries from node {}: {} entries", 
-               request.leader_id, request.entries.len());
-        
+        trace!(
+            "Received append entries from node {}: {} entries",
+            request.leader_id,
+            request.entries.len()
+        );
+
         let mut success = true;
         let current_term = self.persistent_state.get_state().current_term;
-        
+
         // 1. Term Verification Term Update
         if request.term < current_term {
             // Reject request from outdated leader
@@ -523,24 +571,29 @@ impl LogManager {
             }
             return;
         } else if request.term > current_term {
-            debug!(
-                "Updating term from {} to {}",
-                current_term, request.term
-            );
-            if let Err(e) = self.persistent_state.update_term_and_vote(request.term, None) {
+            debug!("Updating term from {} to {}", current_term, request.term);
+            if let Err(e) = self
+                .persistent_state
+                .update_term_and_vote(request.term, None)
+            {
                 error!("Failed to persist term and vote update: {}", e);
             }
         }
-        
+
         // 2. State Transition - if we're not a follower or we have a different leader
         match self.current_state {
             NodeState::Leader { .. } => {
                 // If we're a leader but received AppendEntries with equal or higher term,
                 // we should step down
-                info!("Stepping down from leader to follower due to AppendEntries from node {}", request.leader_id);
+                info!(
+                    "Stepping down from leader to follower due to AppendEntries from node {}",
+                    request.leader_id
+                );
                 self.current_state = NodeState::Follower {
                     leader_id: request.leader_id,
-                    leader_addr: self.peers.get(&request.leader_id)
+                    leader_addr: self
+                        .peers
+                        .get(&request.leader_id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
                 };
@@ -548,20 +601,30 @@ impl LogManager {
             NodeState::Candidate => {
                 // If we're a candidate but received AppendEntries with equal or higher term,
                 // we should revert to follower
-                info!("Reverting from candidate to follower due to AppendEntries from node {}", request.leader_id);
+                info!(
+                    "Reverting from candidate to follower due to AppendEntries from node {}",
+                    request.leader_id
+                );
                 self.current_state = NodeState::Follower {
                     leader_id: request.leader_id,
-                    leader_addr: self.peers.get(&request.leader_id)
+                    leader_addr: self
+                        .peers
+                        .get(&request.leader_id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
                 };
             }
             NodeState::Follower { leader_id, .. } if leader_id != request.leader_id => {
                 // If we're a follower but with a different leader, update leader info
-                info!("Changing leader from {} to {}", leader_id, request.leader_id);
+                info!(
+                    "Changing leader from {} to {}",
+                    leader_id, request.leader_id
+                );
                 self.current_state = NodeState::Follower {
                     leader_id: request.leader_id,
-                    leader_addr: self.peers.get(&request.leader_id)
+                    leader_addr: self
+                        .peers
+                        .get(&request.leader_id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string()),
                 };
@@ -570,7 +633,7 @@ impl LogManager {
                 // Already a follower with the correct leader, no state change needed
             }
         }
-        
+
         // 3. Log Consistency Check
         // Check if follower's log contains an entry at prevLogIndex with matching term
         if request.prev_log_index > 0 {
@@ -591,26 +654,29 @@ impl LogManager {
                 }
             }
         }
-        
+
         // 4. If consistency check passes and there are entries to append, process them
         let mut last_new_entry_index = request.prev_log_index;
-        
+
         if success && !request.entries.is_empty() {
             // Find conflicting entries and truncate log if needed
             for entry in &request.entries {
                 let entry_index = entry.index;
-                
+
                 // Check if we already have an entry at this index
                 if let Some(existing_entry) = self.log.get_entry(entry_index) {
                     if existing_entry.term != entry.term {
                         // Conflict found - truncate log from this point
-                        debug!("Truncating log from index {} due to term mismatch", entry_index);
+                        debug!(
+                            "Truncating log from index {} due to term mismatch",
+                            entry_index
+                        );
                         if let Err(e) = self.log.truncate_from(entry_index) {
                             error!("Failed to truncate log: {}", e);
                             success = false;
                             break;
                         }
-                        
+
                         // Append this entry
                         if let Err(e) = self.log.append(entry.clone()) {
                             error!("Failed to append entry at index {}: {}", entry_index, e);
@@ -633,26 +699,26 @@ impl LogManager {
                     last_new_entry_index = entry_index;
                 }
             }
-            
+
             // 5. Update commit index if needed
             if success && request.leader_commit > self.commit_index {
                 self.commit_index = request.leader_commit.min(last_new_entry_index);
                 debug!("Updated commit index to {}", self.commit_index);
-                
+
                 // Apply newly committed entries to state machine
                 self.apply_committed_entries().await;
             }
         }
-        
+
         // 6. Reset Election Timer
         self.last_heartbeat = Instant::now();
-        
+
         // 7. Send Response
         let response = AppendEntriesResponse {
             term: self.persistent_state.get_state().current_term,
             success,
         };
-        
+
         if oneshot_tx.send(response).is_err() {
             error!("Failed to send AppendEntries response");
         }
@@ -692,7 +758,10 @@ impl LogManager {
 
         // 1. Increment current term and vote for self atomically
         let new_term = self.persistent_state.get_state().current_term + 1;
-        if let Err(e) = self.persistent_state.update_term_and_vote(new_term, Some(self.node_id.0)) {
+        if let Err(e) = self
+            .persistent_state
+            .update_term_and_vote(new_term, Some(self.node_id.0))
+        {
             error!("Failed to persist term and vote update: {}", e);
         }
 
@@ -762,7 +831,10 @@ impl LogManager {
 
         // If the candidate's term is greater than ours, update our term
         if request.term > self.persistent_state.get_state().current_term {
-            if let Err(e) = self.persistent_state.update_term_and_vote(request.term, None) {
+            if let Err(e) = self
+                .persistent_state
+                .update_term_and_vote(request.term, None)
+            {
                 error!("Failed to persist term and vote update: {}", e);
             }
 
@@ -779,7 +851,9 @@ impl LogManager {
         if request.term < self.persistent_state.get_state().current_term {
             // Reject vote if candidate's term is outdated
             vote_granted = false;
-        } else if self.persistent_state.get_state().voted_for.is_none() || self.persistent_state.get_state().voted_for == Some(request.candidate_id) {
+        } else if self.persistent_state.get_state().voted_for.is_none()
+            || self.persistent_state.get_state().voted_for == Some(request.candidate_id)
+        {
             // Check if candidate's log is at least as up-to-date as ours
             let last_log_index = self.log.get_last_index();
             let last_log_term = self.log.get_last_term();
@@ -790,7 +864,10 @@ impl LogManager {
             {
                 // Grant vote
                 vote_granted = true;
-                if let Err(e) = self.persistent_state.update_vote(Some(request.candidate_id)) {
+                if let Err(e) = self
+                    .persistent_state
+                    .update_vote(Some(request.candidate_id))
+                {
                     error!("Failed to persist vote update: {}", e);
                 }
                 self.last_heartbeat = Instant::now(); // Reset election timer
@@ -851,28 +928,35 @@ impl LogManager {
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
     ) {
-        if let NodeState::Leader { next_index, match_index } = &mut self.current_state {
+        if let NodeState::Leader {
+            next_index,
+            match_index,
+        } = &mut self.current_state
+        {
             // If the response term is higher than ours, we're no longer the leader
             if response.term > self.persistent_state.get_state().current_term {
                 info!(
                     "Received higher term ({} > {}) in AppendEntries response. Stepping down as leader.",
                     response.term, self.persistent_state.get_state().current_term
                 );
-                
+
                 // Update our term
-                if let Err(e) = self.persistent_state.update_term_and_vote(response.term, None) {
+                if let Err(e) = self
+                    .persistent_state
+                    .update_term_and_vote(response.term, None)
+                {
                     error!("Failed to persist term and vote update: {}", e);
                 }
-                
+
                 // Revert to follower state
                 self.current_state = NodeState::Follower {
                     leader_id: 0, // Unknown leader
                     leader_addr: "unknown".to_string(),
                 };
-                
+
                 return;
             }
-            
+
             if response.success {
                 // Success - update nextIndex and matchIndex for this follower
                 let last_entry_index = if !request.entries.is_empty() {
@@ -880,33 +964,35 @@ impl LogManager {
                 } else {
                     request.prev_log_index
                 };
-                
+
                 // Update nextIndex to be one past the last entry we sent
                 next_index.insert(peer_addr.clone(), last_entry_index + 1);
-                
+
                 // Update matchIndex to the index of the last entry we know is replicated
                 match_index.insert(peer_addr.clone(), last_entry_index);
-                
+
                 debug!(
                     "Updated nextIndex for {} to {} and matchIndex to {}",
-                    peer_addr, last_entry_index + 1, last_entry_index
+                    peer_addr,
+                    last_entry_index + 1,
+                    last_entry_index
                 );
-                
+
                 // Check if we can advance the commit index
                 self.update_commit_index().await;
             } else {
                 // Failure - decrement nextIndex and retry
                 let current_next_index = next_index.get(&peer_addr).cloned().unwrap_or(1);
-                
+
                 // Decrement nextIndex, but ensure it doesn't go below 1
                 let new_next_index = (current_next_index - 1).max(1);
                 next_index.insert(peer_addr.clone(), new_next_index);
-                
+
                 debug!(
                     "AppendEntries failed for {}. Decremented nextIndex to {}",
                     peer_addr, new_next_index
                 );
-                
+
                 // Retry with earlier log entries
                 self.retry_append_entries(peer_addr).await;
             }
@@ -916,7 +1002,7 @@ impl LogManager {
     async fn retry_append_entries(&mut self, peer_addr: String) {
         if let NodeState::Leader { next_index, .. } = &self.current_state {
             let next_idx = next_index.get(&peer_addr).cloned().unwrap_or(1);
-            
+
             // Get the previous log entry's index and term
             let prev_log_index = next_idx - 1;
             let prev_log_term = if prev_log_index > 0 {
@@ -927,17 +1013,17 @@ impl LogManager {
             } else {
                 0
             };
-            
+
             // Get entries to send (from nextIndex onwards)
             let mut entries = Vec::new();
             let last_log_index = self.log.get_last_index();
-            
+
             for idx in next_idx..=last_log_index {
                 if let Some(entry) = self.log.get_entry(idx) {
                     entries.push(entry.clone());
                 }
             }
-            
+
             // Create AppendEntries request
             let request = AppendEntriesRequest {
                 term: self.persistent_state.get_state().current_term,
@@ -947,7 +1033,7 @@ impl LogManager {
                 entries,
                 leader_commit: self.commit_index,
             };
-            
+
             // Find the peer ID for this address
             let mut peer_id = None;
             for (id, addr) in &self.peers {
@@ -956,29 +1042,40 @@ impl LogManager {
                     break;
                 }
             }
-            
+
             if let Some(id) = peer_id {
                 let raft_session = Arc::clone(&self.raft_session);
                 let response_tx = self.append_entries_response_tx.clone();
                 let peer_addr_clone = peer_addr.clone();
                 let request_clone = request.clone();
-                
+
                 tokio::spawn(async move {
                     let mut session = raft_session.lock().await;
                     match session.send_append_entries(id, request.clone()).await {
                         Ok(response) => {
                             debug!(
                                 "Retry AppendEntries to {} (term: {}, entries: {}): success={}",
-                                peer_addr_clone, request.term, request.entries.len(), response.success
+                                peer_addr_clone,
+                                request.term,
+                                request.entries.len(),
+                                response.success
                             );
-                            
+
                             // Send response back to main task for processing
-                            if let Err(e) = response_tx.send((peer_addr_clone, request, response)).await {
-                                error!("Failed to send retry AppendEntries response to main task: {}", e);
+                            if let Err(e) =
+                                response_tx.send((peer_addr_clone, request, response)).await
+                            {
+                                error!(
+                                    "Failed to send retry AppendEntries response to main task: {}",
+                                    e
+                                );
                             }
                         }
                         Err(e) => {
-                            error!("Failed to send retry AppendEntries to {}: {}", peer_addr_clone, e);
+                            error!(
+                                "Failed to send retry AppendEntries to {}: {}",
+                                peer_addr_clone, e
+                            );
                         }
                     }
                 });
@@ -992,14 +1089,14 @@ impl LogManager {
             let mut match_indices: Vec<u64> = match_index.values().cloned().collect();
             // Add our own last log index
             match_indices.push(self.log.get_last_index());
-            
+
             // Sort in ascending order
             match_indices.sort_unstable();
-            
+
             // Find the median (majority) index
             let majority_idx = match_indices.len() / 2;
             let potential_commit_index = match_indices[majority_idx];
-            
+
             // Only update if the entry at the potential commit index has the current term
             // and it's greater than our current commit index
             if potential_commit_index > self.commit_index {
@@ -1010,7 +1107,7 @@ impl LogManager {
                             self.commit_index, potential_commit_index
                         );
                         self.commit_index = potential_commit_index;
-                        
+
                         // Apply newly committed entries
                         self.apply_committed_entries().await;
                     }

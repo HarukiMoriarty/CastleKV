@@ -1,4 +1,4 @@
 target
 *.txt
-data
+data/
 raft_log*

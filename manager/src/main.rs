@@ -15,7 +15,7 @@ struct Cli {
     listen_addr: String,
 
     #[arg(long, help = "Comma-separated list of KV server addresses")]
-    servers: String,
+    server_addrs: String,
 
     #[arg(
         long,
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Parse server addresses
-    let server_addresses: Vec<String> = parse_server_addresses(&cli.servers)?;
+    let server_addresses: Vec<String> = parse_server_addresses(&cli.server_addrs)?;
 
     // Check if server count is divisible by replication factor
     if server_addresses.len() % cli.server_rf as usize != 0 {

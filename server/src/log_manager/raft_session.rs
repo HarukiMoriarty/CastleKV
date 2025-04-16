@@ -4,8 +4,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tonic::Request;
+use tracing::trace;
 use tracing::warn;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use rpc::raft::{
     raft_client::RaftClient, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest,
@@ -159,7 +160,7 @@ impl PeerConnection {
         &mut self,
         request: AppendEntriesRequest,
     ) -> anyhow::Result<AppendEntriesResponse> {
-        debug!("Sending AppendEntries to peer {}", self.peer_id);
+        trace!("Sending AppendEntries to peer {}", self.peer_id);
 
         // Try to send the request
         if let Err(e) = self.append_entries_tx.send(request.clone()) {
@@ -180,7 +181,7 @@ impl PeerConnection {
         // Try to receive the response
         match self.append_entries_responses.message().await {
             Ok(Some(resp)) => {
-                debug!("Received AppendEntries response from peer {}", self.peer_id);
+                trace!("Received AppendEntries response from peer {}", self.peer_id);
                 Ok(resp)
             }
             Ok(None) => {
@@ -209,7 +210,7 @@ impl PeerConnection {
         &mut self,
         request: RequestVoteRequest,
     ) -> anyhow::Result<RequestVoteResponse> {
-        debug!("Sending RequestVote to peer {}", self.peer_id);
+        trace!("Sending RequestVote to peer {}", self.peer_id);
 
         // Try to send the request
         if let Err(e) = self.request_vote_tx.send(request.clone()) {
@@ -230,7 +231,7 @@ impl PeerConnection {
         // Try to receive the response
         match self.request_vote_responses.message().await {
             Ok(Some(resp)) => {
-                debug!("Received RequestVote response from peer {}", self.peer_id);
+                trace!("Received RequestVote response from peer {}", self.peer_id);
                 Ok(resp)
             }
             Ok(None) => {

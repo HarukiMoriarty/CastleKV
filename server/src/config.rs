@@ -138,12 +138,24 @@ impl ServerConfigBuilder {
 
     /// Set peer replica addresses
     pub fn peer_replica_addr(mut self, addrs: impl Into<String>) -> Self {
+        let my_id: u32 = self.config.node_id.into();
+
+        // Create peer address mapping, skipping our own ID
         self.config.peer_replica_addr = addrs
             .into()
             .split(',')
+            .filter(|s| !s.trim().is_empty())
             .enumerate()
-            .map(|(i, addr)| ((i + 1) as u32, addr.trim().to_string()))
+            .map(|(i, addr)| {
+                let peer_id = if i as u32 >= my_id {
+                    (i + 1) as u32
+                } else {
+                    i as u32
+                };
+                (peer_id, addr.trim().to_string())
+            })
             .collect();
+
         self
     }
 

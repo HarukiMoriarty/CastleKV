@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
-use crate::log_manager::{LogManagerMessage, LogManagerSender};
+use crate::log_manager::{AppendLogResult, LogManagerMessage, LogManagerSender};
 use crate::plan::Plan;
 use common::CommandId;
 use rpc::gateway::Operation;
@@ -137,10 +137,40 @@ impl Executor {
                                     let result = match lock_resp_rx.await {
                                         Ok(true) => {
                                             // Append log entry
-                                            Self::append_raft_log(&mut plan, &log_manager_tx).await;
+                                            let append_log_result =
+                                                Self::append_raft_log(&mut plan, &log_manager_tx)
+                                                    .await;
 
-                                            // Locks acquired successfully
-                                            let ops_results = db.execute(&plan);
+                                            let (status, content, ops_results) =
+                                                match append_log_result {
+                                                    AppendLogResult::Success(log_entry_index) => {
+                                                        plan.log_entry_index =
+                                                            Some(log_entry_index);
+                                                        (
+                                                            Status::Committed,
+                                                            "Operation successful".to_string(),
+                                                            db.execute(&plan),
+                                                        )
+                                                    }
+                                                    AppendLogResult::Failure => (
+                                                        Status::Aborted,
+                                                        "Operation failed".to_string(),
+                                                        vec![],
+                                                    ),
+                                                    AppendLogResult::LeaderSwitch(leader_id) => (
+                                                        Status::Leaderswitch,
+                                                        format!("{}", leader_id),
+                                                        vec![],
+                                                    ),
+                                                    AppendLogResult::NoOp => (
+                                                        Status::Committed,
+                                                        "Operation successful".to_string(),
+                                                        db.execute(&plan),
+                                                    ),
+                                                    AppendLogResult::LeaderUnSelected => {
+                                                        unreachable!()
+                                                    }
+                                                };
 
                                             // Release locks after operation
                                             let _ = lock_manager_tx
@@ -149,8 +179,8 @@ impl Executor {
                                             CommandResult {
                                                 cmd_id: cmd_id.into(),
                                                 ops: ops_results,
-                                                status: Status::Committed as i32,
-                                                content: "Operation successful".to_string(),
+                                                status: status.into(),
+                                                content,
                                                 has_err: false,
                                             }
                                         }
@@ -197,31 +227,64 @@ impl Executor {
         }
     }
 
-    async fn append_raft_log(plan: &mut Plan, log_manager_tx: &LogManagerSender) {
+    async fn append_raft_log(
+        plan: &mut Plan,
+        log_manager_tx: &LogManagerSender,
+    ) -> AppendLogResult {
         let mut log_ops: Vec<Operation> = Vec::new();
-        let (log_resp_tx, log_resp_rx) = oneshot::channel::<u64>();
 
+        // Extract operations that need to be logged
         for op in plan.ops.iter() {
             let op_name = op.name.clone();
-
-            // Only log operations that modify state
             if op_name == "PUT" || op_name == "SWAP" || op_name == "DELETE" {
                 log_ops.push(op.clone());
             }
-            // Other operations like GET or SCAN don't need to be logged
         }
 
-        if !log_ops.is_empty() {
+        // If no operations need logging, return NoOp
+        if log_ops.is_empty() {
+            return AppendLogResult::NoOp;
+        }
+
+        // Try appending with retry for LeaderUnSelected
+        let mut retry_count = 0;
+        const MAX_RETRIES: u8 = 3; // Limit the number of retries
+
+        loop {
+            let (log_resp_tx, log_resp_rx) = oneshot::channel::<AppendLogResult>();
+
             let log_req = LogManagerMessage::AppendEntry {
                 cmd_id: plan.cmd_id,
-                ops: log_ops,
+                ops: log_ops.clone(),
                 resp_tx: log_resp_tx,
             };
 
             log_manager_tx.send(log_req).unwrap();
 
-            // Wait for log response sync to ensure log entry is persisted
-            plan.log_entry_index = Some(log_resp_rx.await.unwrap());
+            // Wait for response
+            match log_resp_rx.await.unwrap() {
+                AppendLogResult::LeaderUnSelected => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        // Give up after MAX_RETRIES attempts
+                        debug!(
+                            "Giving up after {} retries for leader selection",
+                            MAX_RETRIES
+                        );
+                        return AppendLogResult::Failure;
+                    }
+
+                    debug!(
+                        "Leader unselected, retrying in 1 second (attempt {}/{})",
+                        retry_count, MAX_RETRIES
+                    );
+
+                    // Sleep for 200 millseconds before retrying
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+                result => return result, // For any other result, return immediately
+            }
         }
     }
 }

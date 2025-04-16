@@ -153,6 +153,8 @@ impl Manager {
                     // Create partition info
                     let partition_info = PartitionInfo {
                         table_name: table_name.clone(),
+                        partition_id: partition_idx as u32,
+                        replica_id: replica_idx as u32,
                         server_address: server_addr.clone(),
                         start_key,
                         end_key,
