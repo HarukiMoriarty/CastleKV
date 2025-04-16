@@ -74,7 +74,7 @@ impl Executor {
 
                                     // Generate unique monotonical increasing command id
                                     let cmd_id = CommandId::new(
-                                        self.config.node_id,
+                                        self.config.replica_id,
                                         cmd_cnt.fetch_add(1, Ordering::SeqCst),
                                     );
                                     // Set cmd id

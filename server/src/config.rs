@@ -9,7 +9,7 @@ use common::NodeId;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The node id of current server
-    pub node_id: NodeId,
+    pub replica_id: NodeId,
 
     /// The address to listen on from client
     pub client_listen_addr: String,
@@ -54,7 +54,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            node_id: NodeId(0),
+            replica_id: NodeId(0),
             client_listen_addr: "0.0.0.0:23000".to_string(),
             peer_listen_addr: "0.0.0.0:25000".to_string(),
             db_path: None,
@@ -96,7 +96,7 @@ impl ServerConfigBuilder {
 
     /// Set the node ID
     pub fn node_id(mut self, node_id: u32) -> Self {
-        self.config.node_id = NodeId(node_id);
+        self.config.replica_id = NodeId(node_id);
         self
     }
 
@@ -138,7 +138,7 @@ impl ServerConfigBuilder {
 
     /// Set peer replica addresses
     pub fn peer_replica_addr(mut self, addrs: impl Into<String>) -> Self {
-        let my_id: u32 = self.config.node_id.into();
+        let my_id: u32 = self.config.replica_id.into();
 
         // Create peer address mapping, skipping our own ID
         self.config.peer_replica_addr = addrs

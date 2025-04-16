@@ -1,4 +1,5 @@
 use common::NodeId;
+use rpc::raft;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ pub struct LogManager {
     /// Raft session for managing peer connections
     raft_session: Arc<Mutex<RaftSession>>,
     /// Unique identifier for this node
-    node_id: NodeId,
+    replica_id: NodeId,
     /// Map of peer nodes (node_id -> network address)
     peers: HashMap<u32, String>,
     /// Current state in the Raft consensus algorithm (Leader/Follower/Candidate)
@@ -190,7 +191,7 @@ impl LogManager {
             raft_session: Arc::new(Mutex::new(
                 RaftSession::new(config.peer_replica_addr.clone()).await,
             )),
-            node_id: config.node_id,
+            replica_id: config.replica_id,
             peers: config.peer_replica_addr.clone(),
             current_state: NodeState::Follower {
                 leader_id: 0,
@@ -224,12 +225,11 @@ impl LogManager {
                 } => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
-                            debug!("Leader handle client message {:?}", msg);
+                            debug!("Leader handle client message {:?}.", msg);
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
-                            // unimplemented!();
-                            println!("raft_msg: {:?}", raft_msg);
+                            debug!("Leader handle raft request {:?}.", raft_msg);
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
                                     self.handle_append_entries(request, oneshot_tx).await;
@@ -240,9 +240,11 @@ impl LogManager {
                             }
                         },
                         Some((peer_addr, request, response)) = self.append_entries_response_rx.recv() => {
+                            debug!("Leader handle append entries response {:?} from peer {:?}.", response, peer_addr);
                             self.handle_append_entries_response(peer_addr, request, response).await;
                         },
                         _ = heartbeat_interval.tick() => {
+                            debug!("Leader triggered hearbeat.");
                             self.send_heartbeats().await;
                             self.last_heartbeat = Instant::now();
                         },
@@ -251,10 +253,11 @@ impl LogManager {
                 NodeState::Follower { .. } => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
-                            debug!("Follower handle client message {:?}", msg);
+                            debug!("Follower handle client message {:?}.", msg);
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
+                            debug!("Follower handle raft request {:?}.", raft_msg);
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest {
                                     request,
@@ -272,7 +275,7 @@ impl LogManager {
                             }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
-                            info!("Election timeout reached. Becoming candidate.");
+                            info!("Follower triggered election timeout.");
                             self.start_election().await;
                             election_deadline = self.last_heartbeat + self.election_timeout;
                         }
@@ -281,10 +284,11 @@ impl LogManager {
                 NodeState::Candidate => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
-                            debug!("Candidate handle client message {:?}", msg);
+                            debug!("Candidate handle client message {:?}.", msg);
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
+                            debug!("Candidate handle raft request {:?}.", raft_msg);
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
                                     self.handle_append_entries(request, oneshot_tx).await;
@@ -295,15 +299,14 @@ impl LogManager {
                             }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
-                            info!("Election retry timeout. Starting new election.");
+                            info!("Candidate triggered election retry timeout.");
                             self.start_election().await;
                             election_deadline = self.last_heartbeat + self.election_timeout;
                         },
                         _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                            // Periodically check if we've won the election
                             if let Some(vote_result) = self.check_election_result() {
                                 if vote_result {
-                                    info!("Won election for term {}. Becoming leader.", self.persistent_state.get_state().current_term);
+                                    info!("Candidate won election for term {}.", self.persistent_state.get_state().current_term);
                                     self.become_leader().await;
                                 }
                             }
@@ -329,11 +332,11 @@ impl LogManager {
                     // Check the specific non-leader state and respond accordingly
                     match &self.current_state {
                         NodeState::Follower { leader_id, .. } => {
-                            // For followers, return None and the leader's address
+                            // For followers, return leader's address
                             let _ = resp_tx.send(AppendLogResult::LeaderSwitch(*leader_id));
                         }
                         NodeState::Candidate => {
-                            // For candidates, return None for both values
+                            // For candidates, return leader unselected
                             let _ = resp_tx.send(AppendLogResult::LeaderUnSelected);
                         }
                         _ => unreachable!(), // This should not happen given the earlier check
@@ -419,7 +422,7 @@ impl LogManager {
 
                     let append_request = AppendEntriesRequest {
                         term: self.persistent_state.get_state().current_term,
-                        leader_id: self.node_id.0,
+                        leader_id: self.replica_id.into(),
                         prev_log_index,
                         prev_log_term,
                         entries: vec![entry.clone()],
@@ -499,7 +502,7 @@ impl LogManager {
 
         // Create a heartbeat request (empty AppendEntries)
         let heartbeat_request = AppendEntriesRequest {
-            leader_id: self.node_id.0,
+            leader_id: self.replica_id.into(),
             term: self.persistent_state.get_state().current_term,
             prev_log_index: last_log_index,
             prev_log_term: last_log_term,
@@ -743,8 +746,8 @@ impl LogManager {
 
     async fn start_election(&mut self) {
         info!(
-            "[Node {}] Starting election for term {}",
-            self.node_id.0,
+            "[{}] Starting election for term {}",
+            self.replica_id,
             self.persistent_state.get_state().current_term + 1
         );
 
@@ -752,7 +755,7 @@ impl LogManager {
         let new_term = self.persistent_state.get_state().current_term + 1;
         if let Err(e) = self
             .persistent_state
-            .update_term_and_vote(new_term, Some(self.node_id.0))
+            .update_term_and_vote(new_term, Some(self.replica_id.into()))
         {
             error!("Failed to persist term and vote update: {}", e);
         }
@@ -770,7 +773,7 @@ impl LogManager {
 
         let request = RequestVoteRequest {
             term: self.persistent_state.get_state().current_term,
-            candidate_id: self.node_id.0,
+            candidate_id: self.replica_id.into(),
             last_log_index,
             last_log_term,
         };
@@ -778,7 +781,7 @@ impl LogManager {
         // 5. Send RequestVote RPCs to all other servers
         let raft_session = Arc::clone(&self.raft_session);
         let current_term = self.persistent_state.get_state().current_term;
-        let node_id = self.node_id.0;
+        let node_id: u32 = self.replica_id.into();
         let election_result = Arc::clone(&self.election_result);
 
         // Reset election result
@@ -1019,7 +1022,7 @@ impl LogManager {
             // Create AppendEntries request
             let request = AppendEntriesRequest {
                 term: self.persistent_state.get_state().current_term,
-                leader_id: self.node_id.0,
+                leader_id: self.replica_id.into(),
                 prev_log_index,
                 prev_log_term,
                 entries,
