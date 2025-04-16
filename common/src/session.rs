@@ -81,13 +81,13 @@ impl Session {
             // format: partition_id -> replica_group
             partition_by_id
                 .entry(partition_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(partition_replica.clone());
 
             // Add to partition_map for lookup
             partition_map
                 .entry(partition_replica.table_name.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert((
                     partition_replica.start_key,
                     partition_replica.end_key,

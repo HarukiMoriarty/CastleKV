@@ -3,7 +3,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use rpc::raft::{
     raft_server::Raft, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest,

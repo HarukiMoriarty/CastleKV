@@ -51,39 +51,33 @@ pub struct LogManager {
     executor_rx: mpsc::UnboundedReceiver<LogManagerMessage>,
     /// Reference to the key-value database
     db: Arc<KeyValueDb>,
+
+    /// Following field for raft
     /// Raft session for managing peer connections
     raft_session: Arc<Mutex<RaftSession>>,
     /// Unique identifier for this node
     node_id: NodeId,
     /// Map of peer nodes (node_id -> network address)
     peers: HashMap<u32, String>,
-
     /// Current state in the Raft consensus algorithm (Leader/Follower/Candidate)
     current_state: NodeState,
-
     /// Highest log entry known to be committed
     commit_index: u64,
     /// Highest log entry applied to state machine
     last_applied: u64,
-
     /// Timestamp of last received heartbeat
     last_heartbeat: Instant,
     /// Randomized election timeout duration
     election_timeout: Duration,
-
     /// Receiver for incoming raft request messages from peers
     raft_request_incoming_rx: RaftRequestIncomingReceiver,
-
     /// Election result - shared between the main loop and election task
     election_result: Arc<Mutex<Option<ElectionResult>>>,
-
     /// Manager for persistent Raft state
     persistent_state: PersistentStateManager,
-
     /// Channel for receiving AppendEntries responses from spawned tasks
     append_entries_response_rx:
         mpsc::Receiver<(String, AppendEntriesRequest, AppendEntriesResponse)>,
-
     /// Sender for AppendEntries responses (cloned and passed to spawned tasks)
     append_entries_response_tx: mpsc::Sender<(String, AppendEntriesRequest, AppendEntriesResponse)>,
 }
@@ -254,10 +248,7 @@ impl LogManager {
                         },
                     }
                 }
-                NodeState::Follower {
-                    leader_id,
-                    leader_addr,
-                } => {
+                NodeState::Follower { .. } => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
                             debug!("Follower handle client message {:?}", msg);
@@ -321,8 +312,6 @@ impl LogManager {
                 }
             }
         }
-
-        info!("Log manager stopped");
     }
 
     async fn handle_client_request(&mut self, msg: LogManagerMessage) {
@@ -339,10 +328,7 @@ impl LogManager {
 
                     // Check the specific non-leader state and respond accordingly
                     match &self.current_state {
-                        NodeState::Follower {
-                            leader_id,
-                            leader_addr,
-                        } => {
+                        NodeState::Follower { leader_id, .. } => {
                             // For followers, return None and the leader's address
                             let _ = resp_tx.send(AppendLogResult::LeaderSwitch(*leader_id));
                         }
@@ -494,7 +480,7 @@ impl LogManager {
 
                     // Update next_index and match_index for followers
                     // This is optimistic - we'll adjust if AppendEntries fails
-                    for (peer_id, _) in &self.peers {
+                    for peer_id in self.peers.keys() {
                         if let Some(peer_addr) = self.peers.get(peer_id) {
                             next_index.insert(peer_addr.clone(), index + 1);
                             // We don't update match_index yet - that happens when we get successful responses
@@ -556,27 +542,35 @@ impl LogManager {
         let current_term = self.persistent_state.get_state().current_term;
 
         // 1. Term Verification Term Update
-        if request.term < current_term {
-            // Reject request from outdated leader
-            debug!(
-                "Rejecting append entries from outdated leader (term {} < our term {})",
-                request.term, current_term
-            );
-            let response = AppendEntriesResponse {
-                term: current_term,
-                success: false,
-            };
-            if oneshot_tx.send(response).is_err() {
-                error!("Failed to send AppendEntries response");
+        match request.term.cmp(&current_term) {
+            std::cmp::Ordering::Less => {
+                // Reject request from outdated leader
+                debug!(
+                    "Rejecting append entries from outdated leader (term {} < our term {})",
+                    request.term, current_term
+                );
+                let response = AppendEntriesResponse {
+                    term: current_term,
+                    success: false,
+                };
+                if oneshot_tx.send(response).is_err() {
+                    error!("Failed to send AppendEntries response");
+                }
+                return;
             }
-            return;
-        } else if request.term > current_term {
-            debug!("Updating term from {} to {}", current_term, request.term);
-            if let Err(e) = self
-                .persistent_state
-                .update_term_and_vote(request.term, None)
-            {
-                error!("Failed to persist term and vote update: {}", e);
+            std::cmp::Ordering::Greater => {
+                debug!("Updating term from {} to {}", current_term, request.term);
+                if let Err(e) = self
+                    .persistent_state
+                    .update_term_and_vote(request.term, None)
+                {
+                    error!("Failed to persist term and vote update: {}", e);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                if let NodeState::Leader { .. } = self.current_state {
+                    panic!("Impossible for leader received same term append log entry request");
+                }
             }
         }
 
@@ -1047,7 +1041,6 @@ impl LogManager {
                 let raft_session = Arc::clone(&self.raft_session);
                 let response_tx = self.append_entries_response_tx.clone();
                 let peer_addr_clone = peer_addr.clone();
-                let request_clone = request.clone();
 
                 tokio::spawn(async move {
                     let mut session = raft_session.lock().await;

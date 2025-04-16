@@ -213,7 +213,7 @@ impl PeerConnection {
         trace!("Sending RequestVote to peer {}", self.peer_id);
 
         // Try to send the request
-        if let Err(e) = self.request_vote_tx.send(request.clone()) {
+        if let Err(e) = self.request_vote_tx.send(request) {
             warn!(
                 "Failed to send RequestVote request to peer {}: {}",
                 self.peer_id, e
@@ -224,7 +224,7 @@ impl PeerConnection {
 
             // Try again with the new connection
             self.request_vote_tx
-                .send(request.clone())
+                .send(request)
                 .map_err(|e| anyhow::anyhow!("Failed to send request after reconnect: {}", e))?;
         }
 
@@ -378,12 +378,11 @@ impl RaftSession {
         let mut futures = FuturesUnordered::new();
 
         for peer_id in peer_ids {
-            let req = request.clone();
             let session = Arc::clone(&session);
 
             futures.push(tokio::spawn(async move {
                 let mut s = session.lock().await;
-                let result = s.send_request_vote(peer_id, req).await;
+                let result = s.send_request_vote(peer_id, request).await;
                 (peer_id, result)
             }));
         }

@@ -5,21 +5,12 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Represents the persistent state required by the Raft consensus algorithm
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct RaftPersistentState {
     /// Current term, increases monotonically
     pub current_term: u64,
     /// CandidateId that received vote in current term (or None)
     pub voted_for: Option<u32>,
-}
-
-impl Default for RaftPersistentState {
-    fn default() -> Self {
-        Self {
-            current_term: 0,
-            voted_for: None,
-        }
-    }
 }
 
 /// Manages persistence of Raft state to disk
@@ -109,20 +100,6 @@ impl PersistentStateManager {
         self.state
     }
 
-    /// Updates the current term
-    ///
-    /// # Arguments
-    ///
-    /// * `term` - New term value
-    pub fn update_term(&mut self, term: u64) -> io::Result<()> {
-        if term > self.state.current_term {
-            self.state.current_term = term;
-            self.state.voted_for = None; // Reset vote when term changes
-            self.persist()?;
-        }
-        Ok(())
-    }
-
     /// Updates the voted_for field
     ///
     /// # Arguments
@@ -173,31 +150,11 @@ mod tests {
         assert_eq!(manager.get_state().voted_for, None);
 
         // Update state
-        manager.update_term(5)?;
         manager.update_vote(Some(2))?;
 
         // Create a new manager to verify persistence
         let manager2 = PersistentStateManager::new(temp_dir.path())?;
-        assert_eq!(manager2.get_state().current_term, 5);
         assert_eq!(manager2.get_state().voted_for, Some(2));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_term_reset_vote() -> io::Result<()> {
-        let temp_dir = tempdir()?;
-        let mut manager = PersistentStateManager::new(temp_dir.path())?;
-
-        // Set initial state
-        manager.update_term_and_vote(1, Some(2))?;
-        assert_eq!(manager.get_state().current_term, 1);
-        assert_eq!(manager.get_state().voted_for, Some(2));
-
-        // Update to higher term should reset vote
-        manager.update_term(2)?;
-        assert_eq!(manager.get_state().current_term, 2);
-        assert_eq!(manager.get_state().voted_for, None);
 
         Ok(())
     }
