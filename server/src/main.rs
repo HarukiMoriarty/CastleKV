@@ -8,6 +8,9 @@ use server::config::ServerConfig;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    #[arg(long, default_value = "0", help = "Partition id of the current node")]
+    partition_id: u32,
+
     #[arg(long, default_value = "0", help = "Replica id of the current node")]
     replica_id: u32,
 
@@ -99,7 +102,8 @@ impl Cli {
 impl From<Cli> for ServerConfig {
     fn from(cli: Cli) -> Self {
         ServerConfig::builder()
-            .node_id(cli.replica_id)
+            .partition_id(cli.partition_id)
+            .replica_id(cli.replica_id)
             .client_listen_addr(cli.client_listen_addr)
             .peer_listen_addr(cli.peer_listen_addr)
             .db_path(cli.db_path)

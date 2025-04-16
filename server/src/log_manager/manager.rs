@@ -240,7 +240,7 @@ impl LogManager {
                             self.handle_append_entries_response(peer_addr, request, response).await;
                         },
                         _ = heartbeat_interval.tick() => {
-                            debug!("Leader triggered hearbeat.");
+                            trace!("Leader triggered hearbeat.");
                             self.send_heartbeats().await;
                             self.last_heartbeat = Instant::now();
                         },
@@ -253,7 +253,7 @@ impl LogManager {
                             self.handle_client_request(msg).await;
                         },
                         Some(raft_msg) = self.raft_request_incoming_rx.recv() => {
-                            debug!("Follower handle raft request {:?}.", raft_msg);
+                            trace!("Follower handle raft request {:?}.", raft_msg);
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest {
                                     request,

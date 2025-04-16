@@ -8,7 +8,10 @@ use common::NodeId;
 /// Server configuration parameters
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The node id of current server
+    /// The partition id of current server
+    pub partition_id: NodeId,
+
+    /// The replica id of current server
     pub replica_id: NodeId,
 
     /// The address to listen on from client
@@ -54,6 +57,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            partition_id: NodeId(0),
             replica_id: NodeId(0),
             client_listen_addr: "0.0.0.0:23000".to_string(),
             peer_listen_addr: "0.0.0.0:25000".to_string(),
@@ -94,9 +98,15 @@ impl ServerConfigBuilder {
         Self::default()
     }
 
-    /// Set the node ID
-    pub fn node_id(mut self, node_id: u32) -> Self {
-        self.config.replica_id = NodeId(node_id);
+    /// Set the partition ID
+    pub fn partition_id(mut self, partition_id: u32) -> Self {
+        self.config.partition_id = NodeId(partition_id);
+        self
+    }
+
+    /// Set the replica ID
+    pub fn replica_id(mut self, replica_id: u32) -> Self {
+        self.config.replica_id = NodeId(replica_id);
         self
     }
 

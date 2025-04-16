@@ -45,6 +45,8 @@ pub async fn connect_manager(config: &mut ServerConfig) -> Result<(), Box<dyn st
     // Create a request with server address
     let request = RegisterServerRequest {
         server_address: config.client_listen_addr.clone(),
+        partition_id: config.partition_id.into(),
+        replica_id: config.replica_id.into(),
     };
 
     // Register this server with the manager

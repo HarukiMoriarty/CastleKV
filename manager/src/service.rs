@@ -191,6 +191,22 @@ impl ManagerService for Manager {
             Some(server_partitions) => {
                 let assigned_partitions = server_partitions.clone();
 
+                for assigned_partition in &assigned_partitions {
+                    if assigned_partition.partition_id != req_inner.partition_id
+                        || assigned_partition.replica_id != req_inner.replica_id
+                    {
+                        error!(
+                            "Server tried to register with wrong partition/replica id: {}",
+                            server_address
+                        );
+
+                        return Ok(Response::new(RegisterServerResponse {
+                            assigned_partitions: Vec::new(),
+                            has_err: true,
+                        }));
+                    }
+                }
+
                 info!(
                     "Server {} registered with {} table partitions",
                     server_address,
