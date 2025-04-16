@@ -1,5 +1,4 @@
 use common::NodeId;
-use rpc::raft;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -219,10 +218,7 @@ impl LogManager {
 
         loop {
             match &mut self.current_state {
-                NodeState::Leader {
-                    next_index,
-                    match_index,
-                } => {
+                NodeState::Leader { .. } => {
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
                             debug!("Leader handle client message {:?}.", msg);
@@ -404,11 +400,7 @@ impl LogManager {
                 }
 
                 // Replicate to followers
-                if let NodeState::Leader {
-                    next_index,
-                    match_index,
-                } = &mut self.current_state
-                {
+                if let NodeState::Leader { next_index, .. } = &mut self.current_state {
                     // Create AppendEntries request
                     let prev_log_index = index - 1;
                     let prev_log_term = if prev_log_index > 0 {

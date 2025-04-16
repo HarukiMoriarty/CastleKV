@@ -24,9 +24,7 @@ impl Segment {
             .append(true)
             .read(true)
             .open(path)?;
-        Ok(Segment {
-            file,
-        })
+        Ok(Segment { file })
     }
 
     /// Appends a log entry to the current segment and ensures it's persisted
@@ -152,7 +150,7 @@ impl RaftLog {
 
         // Load all entries into memory
         log.entries = log.load_all_entries()?;
-        
+
         Ok(log)
     }
 
@@ -185,10 +183,10 @@ impl RaftLog {
 
         // Append to disk
         self.current_segment.append(&entry)?;
-        
+
         // Also append to in-memory entries
         self.entries.push(entry);
-        
+
         Ok(())
     }
 
@@ -228,7 +226,7 @@ impl RaftLog {
             0 // Return 0 if log is empty
         }
     }
-    
+
     /// Get a log entry at a specific index
     pub fn get_entry(&self, index: u64) -> Option<&LogEntry> {
         // Find the entry with the matching index
@@ -240,7 +238,7 @@ impl RaftLog {
     pub fn truncate_from(&mut self, index: u64) -> io::Result<()> {
         // Remove all entries from index onwards
         self.entries.truncate(index as usize);
-        
+
         // TODO: Also truncate the on-disk segments if needed
         Ok(())
     }
