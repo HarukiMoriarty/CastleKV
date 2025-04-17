@@ -267,6 +267,7 @@ impl LogManager {
                                     oneshot_tx,
                                 } => {
                                     self.handle_request_vote(request, oneshot_tx).await;
+                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 }
                             }
                         },
@@ -288,9 +289,11 @@ impl LogManager {
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
                                     self.handle_append_entries(request, oneshot_tx).await;
+                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 },
                                 RaftRequest::RequestVoteRequest { request, oneshot_tx } => {
                                     self.handle_request_vote(request, oneshot_tx).await;
+                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 },
                             }
                         },
