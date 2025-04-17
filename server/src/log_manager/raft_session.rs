@@ -315,7 +315,11 @@ impl RaftSession {
             s.peer_connections.keys().copied().collect::<Vec<_>>()
         };
 
-        let majority = peer_ids.len() / 2 + 1;
+        let majority = if peer_ids.is_empty() {
+            0
+        } else {
+            peer_ids.len() / 2 + 1
+        };
         let mut futures = FuturesUnordered::new();
 
         for peer_id in peer_ids {
@@ -344,7 +348,6 @@ impl RaftSession {
                 error!("AppendEntries failed to peer {}: {}", peer_id, e);
             }
         }
-
         if success_count >= majority {
             Ok(responses)
         } else {
@@ -374,7 +377,11 @@ impl RaftSession {
             s.peer_connections.keys().copied().collect::<Vec<_>>()
         };
 
-        let majority = peer_ids.len() / 2 + 1;
+        let majority = if peer_ids.is_empty() {
+            0
+        } else {
+            peer_ids.len() / 2 + 1
+        };
         let mut futures = FuturesUnordered::new();
 
         for peer_id in peer_ids {
