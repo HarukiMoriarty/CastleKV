@@ -1,6 +1,6 @@
 mod comm;
 mod manager;
-mod persistent_states;
+mod raft_persistent;
 mod raft_service;
 mod raft_session;
 mod storage;

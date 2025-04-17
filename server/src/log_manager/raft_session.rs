@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tonic::Request;
+use tracing::debug;
 use tracing::trace;
 use tracing::warn;
 use tracing::{error, info};
@@ -95,7 +96,7 @@ impl PeerConnection {
 
     /// Reconnect to the peer
     pub async fn reconnect(&mut self) -> anyhow::Result<()> {
-        info!(
+        debug!(
             "Attempting to reconnect to peer {} at {}",
             self.peer_id, self.addr
         );
@@ -145,7 +146,7 @@ impl PeerConnection {
                 self.request_vote_tx = vote_tx;
                 self.request_vote_responses = vote_response.into_inner();
 
-                info!("Successfully reconnected to peer {}", self.peer_id);
+                debug!("Successfully reconnected to peer {}", self.peer_id);
                 Ok(())
             }
             Err(e) => {

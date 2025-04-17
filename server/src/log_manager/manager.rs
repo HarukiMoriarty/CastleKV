@@ -10,7 +10,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::log_manager::comm::{ElectionResult, LogManagerMessage};
-use crate::log_manager::persistent_states::PersistentStateManager;
+use crate::log_manager::raft_persistent::PersistentStateManager;
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::raft_session::RaftSession;
 use crate::log_manager::storage::RaftLog;
@@ -272,7 +272,7 @@ impl LogManager {
                             }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
-                            info!("Follower triggered election timeout.");
+                            debug!("Follower triggered election timeout.");
                             self.start_election().await;
                             election_deadline = self.last_heartbeat + self.election_timeout;
                         }
@@ -298,14 +298,14 @@ impl LogManager {
                             }
                         },
                         _ = tokio::time::sleep_until(election_deadline.into()) => {
-                            info!("Candidate triggered election retry timeout.");
+                            debug!("Candidate triggered election retry timeout.");
                             self.start_election().await;
                             election_deadline = self.last_heartbeat + self.election_timeout;
                         },
                         _ = tokio::time::sleep(Duration::from_millis(10)) => {
                             if let Some(vote_result) = self.check_election_result() {
                                 if vote_result {
-                                    info!("Candidate won election for term {}.", self.persistent_state.get_state().current_term);
+                                    debug!("Candidate won election for term {}.", self.persistent_state.get_state().current_term);
                                     self.become_leader().await;
                                 }
                             }
@@ -342,7 +342,7 @@ impl LogManager {
                     }
                     return;
                 }
-                info!("Received client request {:?}", cmd_id);
+                debug!("Received client request {:?}", cmd_id);
 
                 // Generate log entry
                 let term = self.persistent_state.get_state().current_term;
@@ -370,7 +370,7 @@ impl LogManager {
                             success = true;
 
                             if retry_count > 0 {
-                                info!(
+                                debug!(
                                     "Successfully appended log entry after {} retries",
                                     retry_count
                                 );
@@ -440,7 +440,7 @@ impl LogManager {
                         .await
                         {
                             Ok(responses) => {
-                                info!("Successfully replicated entry {} to majority", entry_index);
+                                debug!("Successfully replicated entry {} to majority", entry_index);
 
                                 // Send the response with the log index
                                 if resp_tx.send(AppendLogResult::Success(entry_index)).is_err() {
@@ -575,7 +575,7 @@ impl LogManager {
             NodeState::Leader { .. } => {
                 // If we're a leader but received AppendEntries with equal or higher term,
                 // we should step down
-                info!(
+                debug!(
                     "Stepping down from leader to follower due to AppendEntries from node {}",
                     request.leader_id
                 );
@@ -591,7 +591,7 @@ impl LogManager {
             NodeState::Candidate => {
                 // If we're a candidate but received AppendEntries with equal or higher term,
                 // we should revert to follower
-                info!(
+                debug!(
                     "Reverting from candidate to follower due to AppendEntries from node {}",
                     request.leader_id
                 );
@@ -606,7 +606,7 @@ impl LogManager {
             }
             NodeState::Follower { leader_id, .. } if leader_id != request.leader_id => {
                 // If we're a follower but with a different leader, update leader info
-                info!(
+                debug!(
                     "Changing leader from {} to {}",
                     leader_id, request.leader_id
                 );
@@ -740,7 +740,7 @@ impl LogManager {
     }
 
     async fn start_election(&mut self) {
-        info!(
+        debug!(
             "[{}] Starting election for term {}",
             self.replica_id,
             self.persistent_state.get_state().current_term + 1
@@ -789,7 +789,7 @@ impl LogManager {
         tokio::spawn(async move {
             match RaftSession::broadcast_request_vote(raft_session, request).await {
                 Ok(_) => {
-                    info!("Node {} won election for term {}", node_id, current_term);
+                    debug!("Node {} won election for term {}", node_id, current_term);
 
                     // Set the election result
                     let mut result = election_result.lock().await;
@@ -925,7 +925,7 @@ impl LogManager {
         {
             // If the response term is higher than ours, we're no longer the leader
             if response.term > self.persistent_state.get_state().current_term {
-                info!(
+                debug!(
                     "Received higher term ({} > {}) in AppendEntries response. Stepping down as leader.",
                     response.term, self.persistent_state.get_state().current_term
                 );

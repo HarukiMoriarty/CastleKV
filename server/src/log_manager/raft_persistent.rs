@@ -106,20 +106,6 @@ impl PersistentStateManager {
         self.state
     }
 
-    /// Updates the current term
-    ///
-    /// # Arguments
-    ///
-    /// * `term` - New term value
-    pub fn update_term(&mut self, term: u64) -> io::Result<()> {
-        if term > self.state.current_term {
-            self.state.current_term = term;
-            self.state.voted_for = None; // Reset vote when term changes
-            self.persist()?;
-        }
-        Ok(())
-    }
-
     /// Updates the voted_for field
     ///
     /// # Arguments
@@ -175,7 +161,6 @@ mod tests {
         assert_eq!(manager.get_state().voted_for, None);
 
         // Update state
-        manager.update_term(5)?;
         manager.update_vote(Some(2))?;
 
         // Drop the manager to ensure it's flushed to disk
@@ -183,34 +168,8 @@ mod tests {
 
         // Create a new manager to verify persistence
         let manager2 = PersistentStateManager::new(temp_dir.path())?;
-        assert_eq!(manager2.get_state().current_term, 5);
         assert_eq!(manager2.get_state().voted_for, Some(2));
 
         Ok(())
-    }
-
-    #[test]
-    fn test_term_reset_vote() -> io::Result<()> {
-        let temp_dir = tempdir()?;
-        let mut manager = PersistentStateManager::new(temp_dir.path())?;
-
-        // Set initial state
-        manager.update_term_and_vote(1, Some(2))?;
-        assert_eq!(manager.get_state().current_term, 1);
-        assert_eq!(manager.get_state().voted_for, Some(2));
-
-        // Update to higher term should reset vote
-        manager.update_term(2)?;
-        assert_eq!(manager.get_state().current_term, 2);
-        assert_eq!(manager.get_state().voted_for, None);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_default_manager() {
-        let manager = PersistentStateManager::default();
-        assert_eq!(manager.get_state().current_term, 0);
-        assert_eq!(manager.get_state().voted_for, None);
     }
 }
