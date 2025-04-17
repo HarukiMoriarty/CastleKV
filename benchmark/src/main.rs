@@ -117,7 +117,13 @@ async fn execute_command(
                 panic!("Command still aborted after {} retries", MAX_RETRIES);
             }
             Ok(output) => return output,
-            Err(e) => panic!("{}", e),
+            Err(_) => {
+                if retries < MAX_RETRIES {
+                    retries += 1;
+                    // Silently retry aborted commands
+                    continue;
+                }
+            }
         }
     }
 }

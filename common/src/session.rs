@@ -124,7 +124,7 @@ impl Session {
             let connected_server = replicas[&first_replica_id].clone();
 
             // Connect to the first server in the replica group
-            let (tx, rx) = connect_to_server(&connected_server, name)
+            let (tx, rx) = connect_to_server(&connected_server, name, true)
                 .await
                 .with_context(|| format!("Failed to connect to server: {}", connected_server))?;
 
@@ -551,7 +551,7 @@ impl Session {
         }
 
         // Connect to the new server
-        let (tx, rx) = connect_to_server(&server_addr, &self.name)
+        let (tx, rx) = connect_to_server(&server_addr, &self.name, false)
             .await
             .with_context(|| format!("Failed to connect to server: {}", server_addr))?;
 
@@ -668,6 +668,7 @@ async fn connect_to_manager(
 async fn connect_to_server(
     server_address: &str,
     session_name: &str,
+    retry: bool,
 ) -> Result<(mpsc::Sender<Command>, Streaming<CommandResult>)> {
     let server_addr = if !server_address.starts_with("http") {
         format!("http://{}", server_address)
@@ -684,6 +685,10 @@ async fn connect_to_server(
                     "Failed to connect to server: {}, error: {}. Retrying...",
                     server_address, e
                 );
+
+                if !retry {
+                    return Err(anyhow::anyhow!("Failed to connect to server: {}", e));
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         }
