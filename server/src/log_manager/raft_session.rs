@@ -397,7 +397,7 @@ impl RaftSession {
 
                     // Get all peer IDs and connections
                     let peer_ids: Vec<u32> = self.peer_connections.keys().copied().collect();
-                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 + 1 };
+                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 };
 
                     let mut futures = FuturesUnordered::new();
 
@@ -421,6 +421,7 @@ impl RaftSession {
 
                     while let Some(result) = futures.next().await {
                         if let Ok((peer_id, Ok(resp))) = result {
+                            debug!("received vote result from node {peer_id}");
                             term = max(term, resp.term);
                             if resp.vote_granted {
                                 responses.push((peer_id, resp));

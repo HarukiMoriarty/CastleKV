@@ -407,20 +407,6 @@ impl LogManager {
         new_timeout
     }
 
-    /// Helper method to reset candidate election timeout
-    fn reset_candidate_election_timeout(&mut self) -> Instant {
-        let new_timeout = Instant::now() + self.election_timeout;
-
-        if let NodeState::Candidate {
-            candidate_election_timeout,
-        } = &mut self.current_state
-        {
-            *candidate_election_timeout = new_timeout;
-        }
-
-        new_timeout
-    }
-
     /// Helper method to transition to follower state
     fn transition_to_follower(&mut self, leader_id: u32, leader_addr: String) {
         debug!("Transitioning to follower, leader_id={}", leader_id);
@@ -911,6 +897,10 @@ impl LogManager {
             {
                 // Grant vote
                 vote_granted = true;
+                debug!(
+                    "Vote for node {} term {}",
+                    request.candidate_id, request.term
+                );
                 if let Err(e) = self
                     .persistent_state
                     .update_vote(Some(request.candidate_id))
