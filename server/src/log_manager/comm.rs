@@ -19,15 +19,6 @@ pub enum LogManagerMessage {
     },
 }
 
-/// Result of a Raft election
-#[derive(Debug, Clone, Copy)]
-pub struct ElectionResult {
-    /// Whether the election was won
-    pub won: bool,
-    /// The term for which this election result applies
-    pub term: u64,
-}
-
 #[derive(Debug, Clone)]
 pub enum AppendLogResult {
     Success(u64),      // Successfully logged, with log index

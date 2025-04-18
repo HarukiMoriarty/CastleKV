@@ -2,14 +2,14 @@ use common::NodeId;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::interval;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{interval, sleep_until, Instant, Interval};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
-use crate::log_manager::comm::{ElectionResult, LogManagerMessage};
+use crate::log_manager::comm::LogManagerMessage;
 use crate::log_manager::raft_persistent::PersistentStateManager;
 use crate::log_manager::raft_service::{RaftRequest, RaftService};
 use crate::log_manager::raft_session::RaftSession;
@@ -31,9 +31,14 @@ pub enum NodeState {
         leader_id: u32,
         /// Current leader's network address
         leader_addr: String,
+        /// Follower election timeout
+        follower_election_timeout: Instant,
     },
     /// Candidate state - requests votes from peers during election
-    Candidate,
+    Candidate {
+        /// Candidate election timeout
+        candidate_election_timeout: Instant,
+    },
     /// Leader state - handles client requests and replicates log entries to followers
     Leader {
         /// For each peer, index of the next log entry to send
@@ -53,8 +58,6 @@ pub struct LogManager {
     db: Arc<KeyValueDb>,
 
     /// Following field for raft
-    /// Raft session for managing peer connections
-    raft_session: Arc<Mutex<RaftSession>>,
     /// Unique identifier for this node
     replica_id: NodeId,
     /// Map of peer nodes (node_id -> network address)
@@ -65,21 +68,26 @@ pub struct LogManager {
     commit_index: u64,
     /// Highest log entry applied to state machine
     last_applied: u64,
-    /// Timestamp of last received heartbeat
-    last_heartbeat: Instant,
     /// Randomized election timeout duration
     election_timeout: Duration,
     /// Receiver for incoming raft request messages from peers
     raft_request_incoming_rx: RaftRequestIncomingReceiver,
-    /// Election result - shared between the main loop and election task
-    election_result: Arc<Mutex<Option<ElectionResult>>>,
     /// Manager for persistent Raft state
     persistent_state: PersistentStateManager,
-    /// Channel for receiving AppendEntries responses from spawned tasks
-    append_entries_response_rx:
-        mpsc::Receiver<(String, AppendEntriesRequest, AppendEntriesResponse)>,
-    /// Sender for AppendEntries responses (cloned and passed to spawned tasks)
-    append_entries_response_tx: mpsc::Sender<(String, AppendEntriesRequest, AppendEntriesResponse)>,
+
+    /// All channels
+    /// Broadcast append log entry
+    append_entries_req_tx: mpsc::UnboundedSender<AppendEntriesRequest>,
+    append_entries_resp_rx:
+        mpsc::UnboundedReceiver<(Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest)>,
+
+    /// Catchup append log entry
+    catchup_append_req_tx: mpsc::UnboundedSender<(u32, AppendEntriesRequest)>,
+    catchup_append_resp_rx: mpsc::UnboundedReceiver<(u32, AppendEntriesResponse)>,
+
+    /// Vote
+    vote_req_tx: mpsc::UnboundedSender<RequestVoteRequest>,
+    vote_resp_rx: mpsc::UnboundedReceiver<(bool, u64)>,
 }
 
 impl LogManager {
@@ -144,6 +152,23 @@ impl LogManager {
         // Start raft server
         let (raft_request_incoming_tx, raft_request_incoming_rx) =
             mpsc::unbounded_channel::<RaftRequest>();
+
+        // Broad cast append entry
+        let (append_entries_req_tx, append_entries_req_rx) =
+            mpsc::unbounded_channel::<AppendEntriesRequest>();
+        let (append_entries_resp_tx, append_entries_resp_rx) =
+            mpsc::unbounded_channel::<(Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest)>();
+
+        // Catch up append entry
+        let (catchup_append_req_tx, catchup_append_req_rx) =
+            mpsc::unbounded_channel::<(u32, AppendEntriesRequest)>();
+        let (catchup_append_resp_tx, catchup_append_resp_rx) =
+            mpsc::unbounded_channel::<(u32, AppendEntriesResponse)>();
+
+        // Vote
+        let (vote_req_tx, vote_req_rx) = mpsc::unbounded_channel::<RequestVoteRequest>();
+        let (vote_resp_tx, vote_resp_rx) = mpsc::unbounded_channel::<(bool, u64)>();
+
         let raft_service = RaftService::new(raft_request_incoming_tx);
         let peer_listen_addr = config.peer_listen_addr.clone();
         tokio::spawn(async move {
@@ -154,9 +179,6 @@ impl LogManager {
                 .await
                 .unwrap();
         });
-
-        // Initialize with no election result
-        let election_result = Arc::new(Mutex::new(None));
 
         // Initialize persistent state manager
         let persistent_state = match PersistentStateManager::new(
@@ -179,32 +201,52 @@ impl LogManager {
             }
         };
 
-        // Create channel for AppendEntries responses
-        let (append_entries_response_tx, append_entries_response_rx) =
-            mpsc::channel::<(String, AppendEntriesRequest, AppendEntriesResponse)>(100);
+        // Calculate randomized election timeout
+        let election_timeout = Duration::from_millis(300 + rand::random::<u64>() % 200);
+
+        // Initialize as follower with election timeout
+        let current_state = NodeState::Follower {
+            leader_id: 0,
+            leader_addr: "TODO".to_string(),
+            follower_election_timeout: Instant::now() + election_timeout,
+        };
+
+        let peer_replica_addr = config.peer_replica_addr.clone();
+        tokio::spawn(async move {
+            let mut raft_session = RaftSession::new(peer_replica_addr).await;
+            if let Err(e) = raft_session
+                .run(
+                    append_entries_req_rx,
+                    catchup_append_req_rx,
+                    vote_req_rx,
+                    append_entries_resp_tx,
+                    catchup_append_resp_tx,
+                    vote_resp_tx,
+                )
+                .await
+            {
+                error!("RaftSession run error: {}", e);
+            }
+        });
 
         LogManager {
             log,
             executor_rx,
             db,
-            raft_session: Arc::new(Mutex::new(
-                RaftSession::new(config.peer_replica_addr.clone()).await,
-            )),
             replica_id: config.replica_id,
             peers: config.peer_replica_addr.clone(),
-            current_state: NodeState::Follower {
-                leader_id: 0,
-                leader_addr: "TODO".to_string(),
-            },
+            current_state,
             commit_index: 0,
             last_applied: 0,
-            last_heartbeat: Instant::now(),
-            election_timeout: Duration::from_millis(300 + rand::random::<u64>() % 200),
+            election_timeout,
             raft_request_incoming_rx,
-            election_result,
             persistent_state,
-            append_entries_response_tx,
-            append_entries_response_rx,
+            append_entries_req_tx,
+            append_entries_resp_rx,
+            catchup_append_req_tx,
+            catchup_append_resp_rx,
+            vote_req_tx,
+            vote_resp_rx,
         }
     }
 
@@ -212,13 +254,23 @@ impl LogManager {
     pub async fn run(mut self) {
         info!("Log manager started");
 
-        let mut heartbeat_interval = interval(Duration::from_millis(150));
-        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut election_deadline = self.last_heartbeat + self.election_timeout;
+        // Create the heartbeat interval for leader state, initially None
+        let mut leader_heartbeat_interval: Option<Interval> = None;
 
         loop {
             match &mut self.current_state {
                 NodeState::Leader { .. } => {
+                    // Create the interval if we don't already have one
+                    if leader_heartbeat_interval.is_none() {
+                        debug!("Creating new heartbeat interval for leader");
+                        let mut interval = interval(Duration::from_millis(150));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        leader_heartbeat_interval = Some(interval);
+                    }
+
+                    // Unwrap is safe here because we just initialized it if it was None
+                    let heartbeat_interval = leader_heartbeat_interval.as_mut().unwrap();
+
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
                             debug!("Leader handle client message {:?}.", msg);
@@ -235,18 +287,25 @@ impl LogManager {
                                 },
                             }
                         },
-                        Some((peer_addr, request, response)) = self.append_entries_response_rx.recv() => {
-                            debug!("Leader handle append entries response {:?} from peer {:?}.", response, peer_addr);
-                            self.handle_append_entries_response(peer_addr, request, response).await;
+                        Some(responses) = self.append_entries_resp_rx.recv() => {
+                            self.handle_append_entries_responses(responses).await;
                         },
                         _ = heartbeat_interval.tick() => {
                             trace!("Leader triggered hearbeat.");
                             self.send_heartbeats().await;
-                            self.last_heartbeat = Instant::now();
                         },
                     }
                 }
-                NodeState::Follower { .. } => {
+                NodeState::Follower {
+                    follower_election_timeout,
+                    ..
+                } => {
+                    // If we were previously a leader, clean up the interval
+                    if leader_heartbeat_interval.is_some() {
+                        debug!("Dropping heartbeat interval as follower");
+                        leader_heartbeat_interval = None;
+                    }
+
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
                             debug!("Follower handle client message {:?}.", msg);
@@ -260,25 +319,27 @@ impl LogManager {
                                     oneshot_tx,
                                 } => {
                                     self.handle_append_entries(request, oneshot_tx).await;
-                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 }
                                 RaftRequest::RequestVoteRequest {
                                     request,
                                     oneshot_tx,
                                 } => {
                                     self.handle_request_vote(request, oneshot_tx).await;
-                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 }
                             }
                         },
-                        _ = tokio::time::sleep_until(election_deadline.into()) => {
+                        _ = sleep_until(*follower_election_timeout) => {
                             debug!("Follower triggered election timeout.");
                             self.start_election().await;
-                            election_deadline = self.last_heartbeat + self.election_timeout;
                         }
                     }
                 }
-                NodeState::Candidate => {
+                NodeState::Candidate {
+                    candidate_election_timeout,
+                } => {
+                    // It is impossible for leader directly come into candidate, it
+                    // is safe not to reset heartbeat interval
+
                     tokio::select! {
                         Some(msg) = self.executor_rx.recv() => {
                             debug!("Candidate handle client message {:?}.", msg);
@@ -289,24 +350,21 @@ impl LogManager {
                             match raft_msg {
                                 RaftRequest::AppendEntriesRequest { request, oneshot_tx } => {
                                     self.handle_append_entries(request, oneshot_tx).await;
-                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 },
                                 RaftRequest::RequestVoteRequest { request, oneshot_tx } => {
                                     self.handle_request_vote(request, oneshot_tx).await;
-                                    election_deadline = self.last_heartbeat + self.election_timeout;
                                 },
                             }
                         },
-                        _ = tokio::time::sleep_until(election_deadline.into()) => {
+                        _ = sleep_until(*candidate_election_timeout) => {
                             debug!("Candidate triggered election retry timeout.");
                             self.start_election().await;
-                            election_deadline = self.last_heartbeat + self.election_timeout;
                         },
-                        _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                            if let Some(vote_result) = self.check_election_result() {
+                        Some((success, term)) = self.vote_resp_rx.recv() => {
+                            if let Some(vote_result) = self.check_election_result(success, term) {
                                 if vote_result {
                                     debug!("Candidate won election for term {}.", self.persistent_state.get_state().current_term);
-                                    self.become_leader().await;
+                                    self.transition_to_leader();
                                 }
                             }
                         }
@@ -314,6 +372,81 @@ impl LogManager {
                 }
             }
         }
+    }
+
+    /// Helper method to reset follower election timeout
+    fn reset_follower_election_timeout(&mut self) -> Instant {
+        let new_timeout = Instant::now() + self.election_timeout;
+
+        if let NodeState::Follower {
+            follower_election_timeout,
+            ..
+        } = &mut self.current_state
+        {
+            *follower_election_timeout = new_timeout;
+        }
+
+        new_timeout
+    }
+
+    /// Helper method to reset candidate election timeout
+    fn reset_candidate_election_timeout(&mut self) -> Instant {
+        let new_timeout = Instant::now() + self.election_timeout;
+
+        if let NodeState::Candidate {
+            candidate_election_timeout,
+        } = &mut self.current_state
+        {
+            *candidate_election_timeout = new_timeout;
+        }
+
+        new_timeout
+    }
+
+    /// Helper method to transition to follower state
+    fn transition_to_follower(&mut self, leader_id: u32, leader_addr: String) {
+        debug!("Transitioning to follower, leader_id={}", leader_id);
+
+        let follower_election_timeout = Instant::now() + self.election_timeout;
+
+        self.current_state = NodeState::Follower {
+            leader_id,
+            leader_addr,
+            follower_election_timeout,
+        };
+    }
+
+    /// Helper method to transition to candidate state
+    fn transition_to_candidate(&mut self) {
+        debug!("Transitioning to candidate");
+
+        let candidate_election_timeout = Instant::now() + self.election_timeout;
+
+        self.current_state = NodeState::Candidate {
+            candidate_election_timeout,
+        };
+    }
+
+    /// Helper method to transition to leader state
+    fn transition_to_leader(&mut self) {
+        debug!("Transitioning to leader");
+
+        // Initialize leader state
+        let mut next_index = HashMap::new();
+        let mut match_index = HashMap::new();
+
+        // Initialize nextIndex for each server to last log index + 1
+        let last_log_index = self.log.get_last_index();
+
+        for peer_addr in self.peers.values() {
+            next_index.insert(peer_addr.clone(), last_log_index + 1);
+            match_index.insert(peer_addr.clone(), 0);
+        }
+
+        self.current_state = NodeState::Leader {
+            next_index,
+            match_index,
+        };
     }
 
     async fn handle_client_request(&mut self, msg: LogManagerMessage) {
@@ -334,7 +467,7 @@ impl LogManager {
                             // For followers, return leader's address
                             let _ = resp_tx.send(AppendLogResult::LeaderSwitch(*leader_id));
                         }
-                        NodeState::Candidate => {
+                        NodeState::Candidate { .. } => {
                             // For candidates, return leader unselected
                             let _ = resp_tx.send(AppendLogResult::LeaderUnSelected);
                         }
@@ -424,55 +557,7 @@ impl LogManager {
                         leader_commit: self.commit_index,
                     };
 
-                    // Clone the session for the spawned task
-                    let raft_session = Arc::clone(&self.raft_session);
-                    let entry_index = index;
-                    let response_tx = self.append_entries_response_tx.clone();
-
-                    // Spawn a task to handle replication
-                    let peers = self.peers.clone();
-
-                    tokio::spawn(async move {
-                        match RaftSession::broadcast_append_entries(
-                            raft_session,
-                            append_request.clone(),
-                        )
-                        .await
-                        {
-                            Ok(responses) => {
-                                debug!("Successfully replicated entry {} to majority", entry_index);
-
-                                // Send the response with the log index
-                                if resp_tx.send(AppendLogResult::Success(entry_index)).is_err() {
-                                    warn!("Failed to send log append response - receiver dropped");
-                                }
-
-                                // Process individual responses by sending them back to the main task
-                                for (peer_id, response) in responses {
-                                    if let Some(peer_addr) = peers.get(&peer_id) {
-                                        // Send response back to main task for processing
-                                        if let Err(e) = response_tx
-                                            .send((
-                                                peer_addr.clone(),
-                                                append_request.clone(),
-                                                response,
-                                            ))
-                                            .await
-                                        {
-                                            error!("Failed to send AppendEntries response to main task: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to replicate entry to majority: {}", e);
-                                // Send failure response
-                                if resp_tx.send(AppendLogResult::Failure).is_err() {
-                                    warn!("Failed to send log append failure response - receiver dropped");
-                                }
-                            }
-                        }
-                    });
+                    let _ = self.append_entries_req_tx.send(append_request);
 
                     // Update next_index and match_index for followers
                     // This is optimistic - we'll adjust if AppendEntries fails
@@ -505,22 +590,7 @@ impl LogManager {
             leader_commit: self.commit_index,
         };
 
-        // Clone the session for the spawned task
-        let raft_session = Arc::clone(&self.raft_session);
-
-        tokio::spawn(async move {
-            match RaftSession::broadcast_append_entries(raft_session, heartbeat_request).await {
-                Ok(responses) => {
-                    trace!(
-                        "Received {} successful heartbeat responses",
-                        responses.len()
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to reach majority with heartbeat: {}", e);
-                }
-            }
-        });
+        let _ = self.append_entries_req_tx.send(heartbeat_request);
     }
 
     async fn handle_append_entries(
@@ -579,30 +649,30 @@ impl LogManager {
                     "Stepping down from leader to follower due to AppendEntries from node {}",
                     request.leader_id
                 );
-                self.current_state = NodeState::Follower {
-                    leader_id: request.leader_id,
-                    leader_addr: self
-                        .peers
-                        .get(&request.leader_id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                };
+
+                let leader_addr = self
+                    .peers
+                    .get(&request.leader_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                self.transition_to_follower(request.leader_id, leader_addr);
             }
-            NodeState::Candidate => {
+            NodeState::Candidate { .. } => {
                 // If we're a candidate but received AppendEntries with equal or higher term,
                 // we should revert to follower
                 debug!(
                     "Reverting from candidate to follower due to AppendEntries from node {}",
                     request.leader_id
                 );
-                self.current_state = NodeState::Follower {
-                    leader_id: request.leader_id,
-                    leader_addr: self
-                        .peers
-                        .get(&request.leader_id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                };
+
+                let leader_addr = self
+                    .peers
+                    .get(&request.leader_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                self.transition_to_follower(request.leader_id, leader_addr);
             }
             NodeState::Follower { leader_id, .. } if leader_id != request.leader_id => {
                 // If we're a follower but with a different leader, update leader info
@@ -610,17 +680,19 @@ impl LogManager {
                     "Changing leader from {} to {}",
                     leader_id, request.leader_id
                 );
-                self.current_state = NodeState::Follower {
-                    leader_id: request.leader_id,
-                    leader_addr: self
-                        .peers
-                        .get(&request.leader_id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                };
+
+                let leader_addr = self
+                    .peers
+                    .get(&request.leader_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                self.transition_to_follower(request.leader_id, leader_addr);
             }
-            _ => {
-                // Already a follower with the correct leader, no state change needed
+            NodeState::Follower { .. } => {
+                // Already a follower with the correct leader, just reset the election timeout
+                self.reset_follower_election_timeout();
+                debug!("Reset election timer due to heartbeat from leader");
             }
         }
 
@@ -700,8 +772,11 @@ impl LogManager {
             }
         }
 
-        // 6. Reset Election Timer
-        self.last_heartbeat = Instant::now();
+        // 6. Reset Election Timer - always reset if this is a valid AppendEntries
+        if success && matches!(self.current_state, NodeState::Follower { .. }) {
+            self.reset_follower_election_timeout();
+            debug!("Reset election timer due to valid AppendEntries");
+        }
 
         // 7. Send Response
         let response = AppendEntriesResponse {
@@ -756,13 +831,9 @@ impl LogManager {
         }
 
         // 2. Transition to candidate state
-        self.current_state = NodeState::Candidate;
+        self.transition_to_candidate();
 
-        // 3. Reset election timer with randomization
-        self.election_timeout = Duration::from_millis(300 + rand::random::<u64>() % 200);
-        self.last_heartbeat = Instant::now();
-
-        // 4. Prepare RequestVote RPC
+        // 3. Prepare RequestVote RPC
         let last_log_index = self.log.get_last_index();
         let last_log_term = self.log.get_last_term();
 
@@ -773,43 +844,8 @@ impl LogManager {
             last_log_term,
         };
 
-        // 5. Send RequestVote RPCs to all other servers
-        let raft_session = Arc::clone(&self.raft_session);
-        let current_term = self.persistent_state.get_state().current_term;
-        let node_id: u32 = self.replica_id.into();
-        let election_result = Arc::clone(&self.election_result);
-
-        // Reset election result
-        {
-            let mut result = self.election_result.lock().await;
-            *result = None;
-        }
-
-        // Spawn a task to collect votes
-        tokio::spawn(async move {
-            match RaftSession::broadcast_request_vote(raft_session, request).await {
-                Ok(_) => {
-                    debug!("Node {} won election for term {}", node_id, current_term);
-
-                    // Set the election result
-                    let mut result = election_result.lock().await;
-                    *result = Some(ElectionResult {
-                        won: true,
-                        term: current_term,
-                    });
-                }
-                Err(e) => {
-                    warn!("Failed to collect majority votes: {}", e);
-
-                    // Set negative result
-                    let mut result = election_result.lock().await;
-                    *result = Some(ElectionResult {
-                        won: false,
-                        term: current_term,
-                    });
-                }
-            }
-        });
+        // 4. Send RequestVote RPCs to all other servers
+        let _ = self.vote_req_tx.send(request);
     }
 
     async fn handle_request_vote(
@@ -818,6 +854,7 @@ impl LogManager {
         oneshot_tx: oneshot::Sender<RequestVoteResponse>,
     ) {
         let mut vote_granted = false;
+        let was_leader_or_candidate = !matches!(self.current_state, NodeState::Follower { .. });
 
         // If the candidate's term is greater than ours, update our term
         if request.term > self.persistent_state.get_state().current_term {
@@ -830,10 +867,10 @@ impl LogManager {
 
             // If we were a candidate or leader, revert to follower
             if !matches!(self.current_state, NodeState::Follower { .. }) {
-                self.current_state = NodeState::Follower {
-                    leader_id: 0, // Unknown leader
-                    leader_addr: "unknown".to_string(),
-                };
+                debug!("Stepping down to follower due to higher term in RequestVote");
+
+                // Since we don't have a leader yet, use 0 as leader_id
+                self.transition_to_follower(0, "unknown".to_string());
             }
         }
 
@@ -860,8 +897,19 @@ impl LogManager {
                 {
                     error!("Failed to persist vote update: {}", e);
                 }
-                self.last_heartbeat = Instant::now(); // Reset election timer
+
+                // Reset election timer ONLY if we granted the vote
+                if let NodeState::Follower { .. } = &self.current_state {
+                    self.reset_follower_election_timeout();
+                    debug!("Reset election timer due to granting vote");
+                }
             }
+        }
+
+        // Reset election timer if we transitioned from leader/candidate to follower
+        if was_leader_or_candidate && matches!(self.current_state, NodeState::Follower { .. }) {
+            self.reset_follower_election_timeout();
+            debug!("Reset election timer due to state transition in RequestVote");
         }
 
         // Send response
@@ -875,117 +923,105 @@ impl LogManager {
         }
     }
 
-    async fn become_leader(&mut self) {
-        // Initialize leader state
-        let mut next_index = HashMap::new();
-        let mut match_index = HashMap::new();
-
-        // Initialize nextIndex for each server to last log index + 1
-        let last_log_index = self.log.get_last_index();
-
-        for peer_addr in self.peers.values() {
-            next_index.insert(peer_addr.clone(), last_log_index + 1);
-            match_index.insert(peer_addr.clone(), 0);
-        }
-
-        // Transition to leader state
-        self.current_state = NodeState::Leader {
-            next_index,
-            match_index,
-        };
-
-        // Send initial empty AppendEntries RPCs (heartbeats) to establish authority
-        self.send_heartbeats().await;
-    }
-
-    fn check_election_result(&mut self) -> Option<bool> {
-        // Get the current election result
-        if let Ok(guard) = self.election_result.try_lock() {
-            if let Some(result) = *guard {
-                // Only accept results for the current term
-                if result.term == self.persistent_state.get_state().current_term {
-                    return Some(result.won);
-                }
+    fn check_election_result(&mut self, success: bool, term: u64) -> Option<bool> {
+        // Only accept results for the current term
+        if term == self.persistent_state.get_state().current_term {
+            return Some(success);
+        } else if term >= self.persistent_state.get_state().current_term {
+            if let Err(e) = self.persistent_state.update_term_and_vote(term, None) {
+                error!("Failed to persist term and vote update: {}", e);
             }
+            // Default to leader 0 and unknown address
+            self.transition_to_follower(0, "unknown".to_string());
         }
-
         None
     }
 
-    async fn handle_append_entries_response(
+    async fn handle_append_entries_responses(
         &mut self,
-        peer_addr: String,
-        request: AppendEntriesRequest,
-        response: AppendEntriesResponse,
+        responses: (Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest),
     ) {
         if let NodeState::Leader {
             next_index,
             match_index,
         } = &mut self.current_state
         {
-            // If the response term is higher than ours, we're no longer the leader
-            if response.term > self.persistent_state.get_state().current_term {
+            let (per_server_responses, request) = responses;
+            // Find maximum term in all responses
+            let max_term = per_server_responses
+                .iter()
+                .map(|(_, resp)| resp.term)
+                .max()
+                .unwrap_or(0);
+
+            // If max term is higher than ours, step down
+            if max_term > self.persistent_state.get_state().current_term {
                 debug!(
-                    "Received higher term ({} > {}) in AppendEntries response. Stepping down as leader.",
-                    response.term, self.persistent_state.get_state().current_term
+                    "Received higher term ({} > {}) in AppendEntries responses. Stepping down as leader.",
+                    max_term, self.persistent_state.get_state().current_term
                 );
 
                 // Update our term
-                if let Err(e) = self
-                    .persistent_state
-                    .update_term_and_vote(response.term, None)
-                {
+                if let Err(e) = self.persistent_state.update_term_and_vote(max_term, None) {
                     error!("Failed to persist term and vote update: {}", e);
                 }
 
                 // Revert to follower state
-                self.current_state = NodeState::Follower {
-                    leader_id: 0, // Unknown leader
-                    leader_addr: "unknown".to_string(),
-                };
-
+                // TODO: we now just set leader to be 0 and unknow address, waiting for future append
+                self.transition_to_follower(0, "unknown".to_string());
                 return;
             }
 
-            if response.success {
-                // Success - update nextIndex and matchIndex for this follower
-                let last_entry_index = if !request.entries.is_empty() {
-                    request.entries.last().unwrap().index
-                } else {
-                    request.prev_log_index
+            // Process each response individually
+            for (peer_id, response) in per_server_responses {
+                let peer_addr = match self.peers.get(&peer_id) {
+                    Some(addr) => addr.clone(),
+                    None => {
+                        error!("Unknown peer_id {} in response", peer_id);
+                        continue;
+                    }
                 };
 
-                // Update nextIndex to be one past the last entry we sent
-                next_index.insert(peer_addr.clone(), last_entry_index + 1);
+                if response.success {
+                    // Success - update nextIndex and matchIndex for this follower
+                    let last_entry_index = if !request.entries.is_empty() {
+                        request.entries.last().unwrap().index
+                    } else {
+                        request.prev_log_index
+                    };
 
-                // Update matchIndex to the index of the last entry we know is replicated
-                match_index.insert(peer_addr.clone(), last_entry_index);
+                    // Update nextIndex to be one past the last entry we sent
+                    next_index.insert(peer_addr.clone(), last_entry_index + 1);
 
-                debug!(
-                    "Updated nextIndex for {} to {} and matchIndex to {}",
-                    peer_addr,
-                    last_entry_index + 1,
-                    last_entry_index
-                );
+                    // Update matchIndex to the index of the last entry we know is replicated
+                    match_index.insert(peer_addr.clone(), last_entry_index);
 
-                // Check if we can advance the commit index
-                self.update_commit_index().await;
-            } else {
-                // Failure - decrement nextIndex and retry
-                let current_next_index = next_index.get(&peer_addr).cloned().unwrap_or(1);
+                    debug!(
+                        "Updated nextIndex for {} to {} and matchIndex to {}",
+                        peer_addr,
+                        last_entry_index + 1,
+                        last_entry_index
+                    );
+                } else {
+                    // Failure - decrement nextIndex and retry
+                    let current_next_index = next_index.get(&peer_addr).cloned().unwrap_or(1);
 
-                // Decrement nextIndex, but ensure it doesn't go below 1
-                let new_next_index = (current_next_index - 1).max(1);
-                next_index.insert(peer_addr.clone(), new_next_index);
+                    // Decrement nextIndex, but ensure it doesn't go below 1
+                    let new_next_index = std::cmp::max(current_next_index - 1, 1);
+                    next_index.insert(peer_addr.clone(), new_next_index);
 
-                debug!(
-                    "AppendEntries failed for {}. Decremented nextIndex to {}",
-                    peer_addr, new_next_index
-                );
+                    debug!(
+                        "AppendEntries failed for {}. Decremented nextIndex to {}",
+                        peer_addr, new_next_index
+                    );
 
-                // Retry with earlier log entries
-                self.retry_append_entries(peer_addr).await;
+                    // Retry with earlier log entries
+                    self.retry_append_entries(peer_addr).await;
+                }
             }
+
+            // Check if we can advance the commit index after processing all responses
+            self.update_commit_index().await;
         }
     }
 
@@ -1033,41 +1069,9 @@ impl LogManager {
                 }
             }
 
+            // Send append entry request
             if let Some(id) = peer_id {
-                let raft_session = Arc::clone(&self.raft_session);
-                let response_tx = self.append_entries_response_tx.clone();
-                let peer_addr_clone = peer_addr.clone();
-
-                tokio::spawn(async move {
-                    let mut session = raft_session.lock().await;
-                    match session.send_append_entries(id, request.clone()).await {
-                        Ok(response) => {
-                            debug!(
-                                "Retry AppendEntries to {} (term: {}, entries: {}): success={}",
-                                peer_addr_clone,
-                                request.term,
-                                request.entries.len(),
-                                response.success
-                            );
-
-                            // Send response back to main task for processing
-                            if let Err(e) =
-                                response_tx.send((peer_addr_clone, request, response)).await
-                            {
-                                error!(
-                                    "Failed to send retry AppendEntries response to main task: {}",
-                                    e
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to send retry AppendEntries to {}: {}",
-                                peer_addr_clone, e
-                            );
-                        }
-                    }
-                });
+                let _ = self.catchup_append_req_tx.send((id, request));
             }
         }
     }
