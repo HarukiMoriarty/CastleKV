@@ -433,7 +433,7 @@ impl LogManager {
 
     /// Helper method to transition to leader state
     fn transition_to_leader(&mut self) {
-        debug!("Transitioning to leader");
+        info!("Transitioning to leader for term {}", self.persistent_state.get_state().current_term);
 
         // Initialize leader state
         let mut next_index = HashMap::new();
