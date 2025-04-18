@@ -326,7 +326,7 @@ impl RaftSession {
 
                     // Get all peer IDs and connections
                     let peer_ids: Vec<u32> = self.peer_connections.keys().copied().collect();
-                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 + 1 };
+                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 };
 
                     let mut futures = FuturesUnordered::new();
 
