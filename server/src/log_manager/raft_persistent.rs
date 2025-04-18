@@ -79,7 +79,7 @@ impl Default for PersistentStateManager {
     fn default() -> Self {
         Self {
             state: RaftPersistentState::default(),
-            config_name: "raft_state".to_string(),
+            config_name: "./data/state/node".to_string(),
         }
     }
 }

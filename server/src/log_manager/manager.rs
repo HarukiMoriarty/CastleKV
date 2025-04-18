@@ -198,7 +198,7 @@ impl LogManager {
             config
                 .persistent_state_path
                 .as_ref()
-                .map_or_else(|| Path::new("raft_state"), |p| p.as_path()),
+                .map_or_else(|| Path::new("./data/state/node"), |p| p.as_path()),
         ) {
             Ok(state_manager) => {
                 let state = state_manager.get_state();
