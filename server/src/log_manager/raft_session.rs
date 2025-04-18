@@ -3,6 +3,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot::Sender;
 use tokio::sync::Mutex;
 use tonic::Request;
 use tracing::debug;
@@ -14,6 +15,8 @@ use rpc::raft::{
     raft_client::RaftClient, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest,
     RequestVoteResponse,
 };
+
+use super::AppendLogResult;
 
 type AppendEntriesResponseStream = tonic::Streaming<AppendEntriesResponse>;
 type RequestVoteResponseStream = tonic::Streaming<RequestVoteResponse>;
@@ -298,12 +301,17 @@ impl RaftSession {
     /// Process incoming messages from channels
     pub async fn run(
         &mut self,
-        mut append_entries_req_rx: mpsc::UnboundedReceiver<AppendEntriesRequest>,
+        mut append_entries_req_rx: mpsc::UnboundedReceiver<(
+            AppendEntriesRequest,
+            Option<Sender<AppendLogResult>>,
+        )>,
         mut catchup_append_req_rx: mpsc::UnboundedReceiver<(u32, AppendEntriesRequest)>,
         mut vote_req_rx: mpsc::UnboundedReceiver<RequestVoteRequest>,
         append_resp_tx: mpsc::UnboundedSender<(
+            bool,
             Vec<(u32, AppendEntriesResponse)>,
             AppendEntriesRequest,
+            Option<Sender<AppendLogResult>>,
         )>,
         catchup_resp_tx: mpsc::UnboundedSender<(u32, AppendEntriesResponse)>,
         vote_resp_tx: mpsc::UnboundedSender<(bool, u64)>,
@@ -312,7 +320,7 @@ impl RaftSession {
 
         loop {
             tokio::select! {
-                Some(request) = append_entries_req_rx.recv() => {
+                Some((request, sender)) = append_entries_req_rx.recv() => {
                     // Process broadcast AppendEntries
                     debug!("Processing broadcast AppendEntries");
 
@@ -342,18 +350,12 @@ impl RaftSession {
 
                     while let Some(result) = futures.next().await {
                         if let Ok((peer_id, Ok(resp))) = result {
+                            responses.push((peer_id, resp));
                             // Append success, check if we reach majority
                             if resp.success {
-                                responses.push((peer_id, resp));
                                 success_count += 1;
                                 if success_count >= majority {
                                     break;
-                                }
-                            }
-                            // Outdated log entry, ask leader to catch up
-                            else {
-                                if let Err(e) = catchup_resp_tx.send((peer_id, resp)) {
-                                    error!("Failed to send append responses: {}", e);
                                 }
                             }
                         } else if let Ok((peer_id, Err(e))) = result {
@@ -362,11 +364,13 @@ impl RaftSession {
                     }
 
                     if success_count >= majority {
-                        if let Err(e) = append_resp_tx.send((responses, request)) {
+                        if let Err(e) = append_resp_tx.send((true, responses, request, sender)) {
                             error!("Failed to send append responses: {}", e);
                         }
                     } else {
-                        error!("Failed to reach majority in AppendEntries");
+                        if let Err(e) = append_resp_tx.send((false, responses, request, sender)) {
+                            error!("Failed to send append responses: {}", e);
+                        }
                     }
                 },
 

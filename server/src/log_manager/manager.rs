@@ -77,9 +77,16 @@ pub struct LogManager {
 
     /// All channels
     /// Broadcast append log entry
-    append_entries_req_tx: mpsc::UnboundedSender<AppendEntriesRequest>,
-    append_entries_resp_rx:
-        mpsc::UnboundedReceiver<(Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest)>,
+    append_entries_req_tx: mpsc::UnboundedSender<(
+        AppendEntriesRequest,
+        Option<oneshot::Sender<AppendLogResult>>,
+    )>,
+    append_entries_resp_rx: mpsc::UnboundedReceiver<(
+        bool,
+        Vec<(u32, AppendEntriesResponse)>,
+        AppendEntriesRequest,
+        Option<oneshot::Sender<AppendLogResult>>,
+    )>,
 
     /// Catchup append log entry
     catchup_append_req_tx: mpsc::UnboundedSender<(u32, AppendEntriesRequest)>,
@@ -154,10 +161,16 @@ impl LogManager {
             mpsc::unbounded_channel::<RaftRequest>();
 
         // Broad cast append entry
-        let (append_entries_req_tx, append_entries_req_rx) =
-            mpsc::unbounded_channel::<AppendEntriesRequest>();
-        let (append_entries_resp_tx, append_entries_resp_rx) =
-            mpsc::unbounded_channel::<(Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest)>();
+        let (append_entries_req_tx, append_entries_req_rx) = mpsc::unbounded_channel::<(
+            AppendEntriesRequest,
+            Option<oneshot::Sender<AppendLogResult>>,
+        )>();
+        let (append_entries_resp_tx, append_entries_resp_rx) = mpsc::unbounded_channel::<(
+            bool,
+            Vec<(u32, AppendEntriesResponse)>,
+            AppendEntriesRequest,
+            Option<oneshot::Sender<AppendLogResult>>,
+        )>();
 
         // Catch up append entry
         let (catchup_append_req_tx, catchup_append_req_rx) =
@@ -171,6 +184,8 @@ impl LogManager {
 
         let raft_service = RaftService::new(raft_request_incoming_tx);
         let peer_listen_addr = config.peer_listen_addr.clone();
+
+        // Start session
         tokio::spawn(async move {
             info!("Starting Raft server at {}", peer_listen_addr);
             tonic::transport::Server::builder()
@@ -290,6 +305,9 @@ impl LogManager {
                         Some(responses) = self.append_entries_resp_rx.recv() => {
                             self.handle_append_entries_responses(responses).await;
                         },
+                        Some(catchup_response) = self.catchup_append_resp_rx.recv() => {
+                            self.handle_catchup_append_response(catchup_response);
+                        }
                         _ = heartbeat_interval.tick() => {
                             trace!("Leader triggered hearbeat.");
                             self.send_heartbeats().await;
@@ -557,7 +575,9 @@ impl LogManager {
                         leader_commit: self.commit_index,
                     };
 
-                    let _ = self.append_entries_req_tx.send(append_request);
+                    let _ = self
+                        .append_entries_req_tx
+                        .send((append_request, Some(resp_tx)));
 
                     // Update next_index and match_index for followers
                     // This is optimistic - we'll adjust if AppendEntries fails
@@ -590,7 +610,7 @@ impl LogManager {
             leader_commit: self.commit_index,
         };
 
-        let _ = self.append_entries_req_tx.send(heartbeat_request);
+        let _ = self.append_entries_req_tx.send((heartbeat_request, None));
     }
 
     async fn handle_append_entries(
@@ -939,14 +959,24 @@ impl LogManager {
 
     async fn handle_append_entries_responses(
         &mut self,
-        responses: (Vec<(u32, AppendEntriesResponse)>, AppendEntriesRequest),
+        responses: (
+            bool,
+            Vec<(u32, AppendEntriesResponse)>,
+            AppendEntriesRequest,
+            Option<oneshot::Sender<AppendLogResult>>,
+        ),
     ) {
+        // Collect necessary data outside the borrow
+        let mut peers_to_retry = Vec::new();
+
         if let NodeState::Leader {
             next_index,
             match_index,
         } = &mut self.current_state
         {
-            let (per_server_responses, request) = responses;
+            let (success, per_server_responses, request, sender) = responses;
+
+            // 1. Check if we are still in valid term
             // Find maximum term in all responses
             let max_term = per_server_responses
                 .iter()
@@ -972,7 +1002,21 @@ impl LogManager {
                 return;
             }
 
-            // Process each response individually
+            // 2. Check if append success, if not do nothing
+            if !success {
+                return;
+            }
+
+            if let Some(sender) = sender {
+                if sender
+                    .send(AppendLogResult::Success(request.prev_log_index + 1))
+                    .is_err()
+                {
+                    warn!("Failed to send log append response - receiver dropped");
+                }
+            };
+
+            // 3. Process each response individually
             for (peer_id, response) in per_server_responses {
                 let peer_addr = match self.peers.get(&peer_id) {
                     Some(addr) => addr.clone(),
@@ -1003,7 +1047,8 @@ impl LogManager {
                         last_entry_index
                     );
                 } else {
-                    // Failure - decrement nextIndex and retry
+                    // Failure: we should sure in this case is some node too old
+                    // decrement nextIndex and retry
                     let current_next_index = next_index.get(&peer_addr).cloned().unwrap_or(1);
 
                     // Decrement nextIndex, but ensure it doesn't go below 1
@@ -1015,17 +1060,51 @@ impl LogManager {
                         peer_addr, new_next_index
                     );
 
-                    // Retry with earlier log entries
-                    self.retry_append_entries(peer_addr).await;
+                    peers_to_retry.push(peer_addr);
                 }
             }
 
             // Check if we can advance the commit index after processing all responses
             self.update_commit_index().await;
         }
+
+        // Now perform the retries outside of the borrow
+        for peer_addr in peers_to_retry {
+            self.retry_append_entries(peer_addr);
+        }
     }
 
-    async fn retry_append_entries(&mut self, peer_addr: String) {
+    fn handle_catchup_append_response(
+        &mut self,
+        catchup_append_response: (u32, AppendEntriesResponse),
+    ) {
+        if let NodeState::Leader { next_index, .. } = &mut self.current_state {
+            let (peer_id, response) = catchup_append_response;
+            if !response.success {
+                let peer_addr = match self.peers.get(&peer_id) {
+                    Some(addr) => addr.clone(),
+                    None => {
+                        panic!("Unknown peer_id {} in response", peer_id);
+                    }
+                };
+                // Failure: we should sure in this case is some node too old
+                // decrement nextIndex and retry
+                let current_next_index = next_index.get(&peer_addr).cloned().unwrap_or(1);
+
+                // Decrement nextIndex, but ensure it doesn't go below 1
+                let new_next_index = std::cmp::max(current_next_index - 1, 1);
+                next_index.insert(peer_addr.clone(), new_next_index);
+
+                debug!(
+                    "AppendEntries failed for {}. Decremented nextIndex to {}",
+                    peer_addr, new_next_index
+                );
+                self.retry_append_entries(peer_addr);
+            }
+        }
+    }
+
+    fn retry_append_entries(&mut self, peer_addr: String) {
         if let NodeState::Leader { next_index, .. } = &self.current_state {
             let next_idx = next_index.get(&peer_addr).cloned().unwrap_or(1);
 
