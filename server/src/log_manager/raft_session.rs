@@ -1,4 +1,5 @@
 use futures::stream::{FuturesUnordered, StreamExt};
+use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -260,7 +261,7 @@ impl PeerConnection {
 /// Manages RPC client connections to other Raft nodes
 pub struct RaftSession {
     /// Map of connected clients
-    peer_connections: HashMap<u32, PeerConnection>,
+    peer_connections: HashMap<u32, Arc<Mutex<PeerConnection>>>,
 }
 
 impl RaftSession {
@@ -277,7 +278,7 @@ impl RaftSession {
             loop {
                 match PeerConnection::new(peer_id, addr.clone()).await {
                     Ok(connection) => {
-                        peer_connections.insert(peer_id, connection);
+                        peer_connections.insert(peer_id, Arc::new(Mutex::new(connection)));
                         break;
                     }
                     Err(e) => {
@@ -294,127 +295,163 @@ impl RaftSession {
         Self { peer_connections }
     }
 
-    /// Send AppendEntries RPC to a specific peer
-    pub async fn send_append_entries(
+    /// Process incoming messages from channels
+    pub async fn run(
         &mut self,
-        peer_id: u32,
-        request: AppendEntriesRequest,
-    ) -> anyhow::Result<AppendEntriesResponse> {
-        match self.peer_connections.get_mut(&peer_id) {
-            Some(connection) => connection.send_append_entries(request).await,
-            None => Err(anyhow::anyhow!("No connection found for peer {}", peer_id)),
-        }
-    }
+        mut append_entries_req_rx: mpsc::UnboundedReceiver<AppendEntriesRequest>,
+        mut catchup_append_req_rx: mpsc::UnboundedReceiver<(u32, AppendEntriesRequest)>,
+        mut vote_req_rx: mpsc::UnboundedReceiver<RequestVoteRequest>,
+        append_resp_tx: mpsc::UnboundedSender<(
+            Vec<(u32, AppendEntriesResponse)>,
+            AppendEntriesRequest,
+        )>,
+        catchup_resp_tx: mpsc::UnboundedSender<(u32, AppendEntriesResponse)>,
+        vote_resp_tx: mpsc::UnboundedSender<(bool, u64)>,
+    ) -> anyhow::Result<()> {
+        info!("Starting message processing loop");
 
-    /// Broadcast AppendEntries to all peers and wait for majority success
-    pub async fn broadcast_append_entries(
-        session: Arc<Mutex<RaftSession>>,
-        request: AppendEntriesRequest,
-    ) -> anyhow::Result<Vec<(u32, AppendEntriesResponse)>> {
-        let peer_ids = {
-            let s = session.lock().await;
-            s.peer_connections.keys().copied().collect::<Vec<_>>()
-        };
+        loop {
+            tokio::select! {
+                Some(request) = append_entries_req_rx.recv() => {
+                    // Process broadcast AppendEntries
+                    debug!("Processing broadcast AppendEntries");
 
-        let majority = if peer_ids.is_empty() {
-            0
-        } else {
-            peer_ids.len() / 2 + 1
-        };
-        let mut futures = FuturesUnordered::new();
+                    // Get all peer IDs and connections
+                    let peer_ids: Vec<u32> = self.peer_connections.keys().copied().collect();
+                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 + 1 };
 
-        for peer_id in peer_ids {
-            let req = request.clone();
-            let session = Arc::clone(&session);
+                    let mut futures = FuturesUnordered::new();
 
-            futures.push(tokio::spawn(async move {
-                let mut s = session.lock().await;
-                let result = s.send_append_entries(peer_id, req).await;
-                (peer_id, result)
-            }));
-        }
+                    // Send to all peers in parallel
+                    for peer_id in peer_ids {
+                        if let Some(connection) = self.peer_connections.get(&peer_id) {
+                            let connection = Arc::clone(connection);
+                            let req = request.clone();
 
-        let mut responses = Vec::new();
-        let mut success_count = 0;
+                            futures.push(tokio::spawn(async move {
+                                let mut conn = connection.lock().await;
+                                let result = conn.send_append_entries(req).await;
+                                (peer_id, result)
+                            }));
+                        }
+                    }
 
-        while let Some(result) = futures.next().await {
-            if let Ok((peer_id, Ok(resp))) = result {
-                responses.push((peer_id, resp));
-                success_count += 1;
+                    // Collect responses
+                    let mut responses = Vec::new();
+                    let mut success_count = 0;
 
-                if success_count >= majority {
+                    while let Some(result) = futures.next().await {
+                        if let Ok((peer_id, Ok(resp))) = result {
+                            // Append success, check if we reach majority
+                            if resp.success {
+                                responses.push((peer_id, resp));
+                                success_count += 1;
+                                if success_count >= majority {
+                                    break;
+                                }
+                            }
+                            // Outdated log entry, ask leader to catch up
+                            else {
+                                if let Err(e) = catchup_resp_tx.send((peer_id, resp)) {
+                                    error!("Failed to send append responses: {}", e);
+                                }
+                            }
+                        } else if let Ok((peer_id, Err(e))) = result {
+                            error!("AppendEntries failed to peer {}: {}", peer_id, e);
+                        }
+                    }
+
+                    if success_count >= majority {
+                        if let Err(e) = append_resp_tx.send((responses, request)) {
+                            error!("Failed to send append responses: {}", e);
+                        }
+                    } else {
+                        error!("Failed to reach majority in AppendEntries");
+                    }
+                },
+
+                Some((peer_id, request)) = catchup_append_req_rx.recv() => {
+                    // Process catchup AppendEntries to a specific peer
+                    debug!("Processing catchup AppendEntries to peer {}", peer_id);
+
+                    let result = if let Some(connection) = self.peer_connections.get(&peer_id) {
+                        let mut conn = connection.lock().await;
+                        conn.send_append_entries(request).await
+                    } else {
+                        Err(anyhow::anyhow!("No connection found for peer {}", peer_id))
+                    };
+
+                    if let Ok(resp) = result {
+                        if let Err(e) = catchup_resp_tx.send((peer_id, resp)) {
+                            error!("Failed to send catchup response: {}", e);
+                        }
+                    }
+                },
+
+                Some(request) = vote_req_rx.recv() => {
+                    // Process broadcast RequestVote
+                    debug!("Processing broadcast RequestVote");
+
+                    // Get all peer IDs and connections
+                    let peer_ids: Vec<u32> = self.peer_connections.keys().copied().collect();
+                    let majority = if peer_ids.is_empty() { 0 } else { peer_ids.len() / 2 + 1 };
+
+                    let mut futures = FuturesUnordered::new();
+
+                    // Send to all peers in parallel
+                    for peer_id in peer_ids {
+                        if let Some(connection) = self.peer_connections.get(&peer_id) {
+                            let connection = Arc::clone(connection);
+                            let req = request.clone();
+
+                            futures.push(tokio::spawn(async move {
+                                let mut conn = connection.lock().await;
+                                let result = conn.send_request_vote(req).await;
+                                (peer_id, result)
+                            }));
+                        }
+                    }
+
+                    // Collect responses
+                    let mut responses = Vec::new();
+                    let mut success_count = 0;
+                    let mut term = 0;
+
+                    while let Some(result) = futures.next().await {
+                        if let Ok((peer_id, Ok(resp))) = result {
+                            term = max(term, resp.term);
+                            if resp.vote_granted {
+                                responses.push((peer_id, resp));
+                                success_count += 1;
+                                    if success_count >= majority {
+                                    break;
+                                }
+                            }
+                        } else if let Ok((peer_id, Err(e))) = result {
+                            error!("RequestVote failed to peer {}: {}", peer_id, e);
+                        }
+                    }
+
+                    if success_count >= majority {
+                        if let Err(e) = vote_resp_tx.send((true, term)) {
+                            error!("Failed to send vote responses: {}", e);
+                        }
+                    } else {
+                        assert_ne!(term, 0);
+                        if let Err(e) = vote_resp_tx.send((false, term)) {
+                            error!("Failed to send vote responses: {}", e);
+                        }
+                    }
+                },
+
+                else => {
+                    // All channels closed
+                    info!("All message channels closed, terminating message loop");
                     break;
                 }
-            } else if let Ok((peer_id, Err(e))) = result {
-                error!("AppendEntries failed to peer {}: {}", peer_id, e);
-            }
-        }
-        if success_count >= majority {
-            Ok(responses)
-        } else {
-            Err(anyhow::anyhow!("Failed to reach majority in AppendEntries"))
-        }
-    }
-
-    /// Send RequestVote RPC to a specific peer
-    pub async fn send_request_vote(
-        &mut self,
-        peer_id: u32,
-        request: RequestVoteRequest,
-    ) -> anyhow::Result<RequestVoteResponse> {
-        match self.peer_connections.get_mut(&peer_id) {
-            Some(connection) => connection.send_request_vote(request).await,
-            None => Err(anyhow::anyhow!("No connection found for peer {}", peer_id)),
-        }
-    }
-
-    /// Broadcast RequestVote to all peers and wait for majority success
-    pub async fn broadcast_request_vote(
-        session: Arc<Mutex<RaftSession>>,
-        request: RequestVoteRequest,
-    ) -> anyhow::Result<Vec<(u32, RequestVoteResponse)>> {
-        let peer_ids = {
-            let s = session.lock().await;
-            s.peer_connections.keys().copied().collect::<Vec<_>>()
-        };
-
-        let majority = if peer_ids.is_empty() {
-            0
-        } else {
-            peer_ids.len() / 2 + 1
-        };
-        let mut futures = FuturesUnordered::new();
-
-        for peer_id in peer_ids {
-            let session = Arc::clone(&session);
-
-            futures.push(tokio::spawn(async move {
-                let mut s = session.lock().await;
-                let result = s.send_request_vote(peer_id, request).await;
-                (peer_id, result)
-            }));
-        }
-
-        let mut responses = Vec::new();
-        let mut success_count = 0;
-
-        while let Some(result) = futures.next().await {
-            if let Ok((peer_id, Ok(resp))) = result {
-                responses.push((peer_id, resp));
-                success_count += 1;
-
-                if success_count >= majority {
-                    break;
-                }
-            } else if let Ok((peer_id, Err(e))) = result {
-                error!("RequestVote failed to peer {}: {}", peer_id, e);
             }
         }
 
-        if success_count >= majority {
-            Ok(responses)
-        } else {
-            Err(anyhow::anyhow!("Failed to reach majority in RequestVote"))
-        }
+        Ok(())
     }
 }
