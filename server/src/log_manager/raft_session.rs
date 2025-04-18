@@ -11,6 +11,7 @@ use tracing::trace;
 use tracing::warn;
 use tracing::{error, info};
 
+use super::manager::AppendEntriesResponseData;
 use rpc::raft::{
     raft_client::RaftClient, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest,
     RequestVoteResponse,
@@ -307,12 +308,7 @@ impl RaftSession {
         )>,
         mut catchup_append_req_rx: mpsc::UnboundedReceiver<(u32, AppendEntriesRequest)>,
         mut vote_req_rx: mpsc::UnboundedReceiver<RequestVoteRequest>,
-        append_resp_tx: mpsc::UnboundedSender<(
-            bool,
-            Vec<(u32, AppendEntriesResponse)>,
-            AppendEntriesRequest,
-            Option<Sender<AppendLogResult>>,
-        )>,
+        append_resp_tx: mpsc::UnboundedSender<AppendEntriesResponseData>,
         catchup_resp_tx: mpsc::UnboundedSender<(u32, AppendEntriesResponse)>,
         vote_resp_tx: mpsc::UnboundedSender<(bool, u64)>,
     ) -> anyhow::Result<()> {

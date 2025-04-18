@@ -48,6 +48,14 @@ pub enum NodeState {
     },
 }
 
+/// Custom type to simplify complex nested tuple types
+pub type AppendEntriesResponseData = (
+    bool,
+    Vec<(u32, AppendEntriesResponse)>,
+    AppendEntriesRequest,
+    Option<oneshot::Sender<AppendLogResult>>,
+);
+
 /// Manager for Raft log operations and consensus
 pub struct LogManager {
     /// Underlying Raft log implementation
@@ -81,12 +89,7 @@ pub struct LogManager {
         AppendEntriesRequest,
         Option<oneshot::Sender<AppendLogResult>>,
     )>,
-    append_entries_resp_rx: mpsc::UnboundedReceiver<(
-        bool,
-        Vec<(u32, AppendEntriesResponse)>,
-        AppendEntriesRequest,
-        Option<oneshot::Sender<AppendLogResult>>,
-    )>,
+    append_entries_resp_rx: mpsc::UnboundedReceiver<AppendEntriesResponseData>,
 
     /// Catchup append log entry
     catchup_append_req_tx: mpsc::UnboundedSender<(u32, AppendEntriesRequest)>,
@@ -102,10 +105,9 @@ impl LogManager {
     ///
     /// # Arguments
     ///
-    /// * `log_path` - Optional path to store log files
-    /// * `rx` - Channel receiver for log manager messages
+    /// * `config` - Server configuration containing log path and other settings
+    /// * `executor_rx` - Channel receiver for log manager messages
     /// * `db` - Reference to the key-value database
-    /// * `max_segment_size` - Maximum size of each log segment in bytes
     pub async fn new(
         config: &ServerConfig,
         executor_rx: mpsc::UnboundedReceiver<LogManagerMessage>,
@@ -160,17 +162,13 @@ impl LogManager {
         let (raft_request_incoming_tx, raft_request_incoming_rx) =
             mpsc::unbounded_channel::<RaftRequest>();
 
-        // Broad cast append entry
+        // Broadcast append entry
         let (append_entries_req_tx, append_entries_req_rx) = mpsc::unbounded_channel::<(
             AppendEntriesRequest,
             Option<oneshot::Sender<AppendLogResult>>,
         )>();
-        let (append_entries_resp_tx, append_entries_resp_rx) = mpsc::unbounded_channel::<(
-            bool,
-            Vec<(u32, AppendEntriesResponse)>,
-            AppendEntriesRequest,
-            Option<oneshot::Sender<AppendLogResult>>,
-        )>();
+        let (append_entries_resp_tx, append_entries_resp_rx) =
+            mpsc::unbounded_channel::<AppendEntriesResponseData>();
 
         // Catch up append entry
         let (catchup_append_req_tx, catchup_append_req_rx) =
@@ -433,7 +431,10 @@ impl LogManager {
 
     /// Helper method to transition to leader state
     fn transition_to_leader(&mut self) {
-        info!("Transitioning to leader for term {}", self.persistent_state.get_state().current_term);
+        info!(
+            "Transitioning to leader for term {}",
+            self.persistent_state.get_state().current_term
+        );
 
         // Initialize leader state
         let mut next_index = HashMap::new();
@@ -947,15 +948,7 @@ impl LogManager {
         None
     }
 
-    async fn handle_append_entries_responses(
-        &mut self,
-        responses: (
-            bool,
-            Vec<(u32, AppendEntriesResponse)>,
-            AppendEntriesRequest,
-            Option<oneshot::Sender<AppendLogResult>>,
-        ),
-    ) {
+    async fn handle_append_entries_responses(&mut self, responses: AppendEntriesResponseData) {
         // Collect necessary data outside the borrow
         let mut peers_to_retry = Vec::new();
 
