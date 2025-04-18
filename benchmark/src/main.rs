@@ -110,6 +110,7 @@ async fn execute_command(
         match handle_result(session.finish_command().await, key_len) {
             Ok(output) if output == "Aborted" && retries < MAX_RETRIES => {
                 retries += 1;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 // Silently retry aborted commands
                 continue;
             }
@@ -120,6 +121,7 @@ async fn execute_command(
             Err(_) => {
                 if retries < MAX_RETRIES {
                     retries += 1;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     // Silently retry aborted commands
                     continue;
                 }
