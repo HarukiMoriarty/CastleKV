@@ -367,11 +367,10 @@ impl RaftSession {
                         if let Err(e) = append_resp_tx.send((true, responses, request, sender)) {
                             error!("Failed to send append responses: {}", e);
                         }
-                    } else {
-                        if let Err(e) = append_resp_tx.send((false, responses, request, sender)) {
-                            error!("Failed to send append responses: {}", e);
-                        }
+                    } else if let Err(e) = append_resp_tx.send((false, responses, request, sender)) {
+                        error!("Failed to send append responses: {}", e);
                     }
+
                 },
 
                 Some((peer_id, request)) = catchup_append_req_rx.recv() => {
@@ -406,11 +405,10 @@ impl RaftSession {
                     for peer_id in peer_ids {
                         if let Some(connection) = self.peer_connections.get(&peer_id) {
                             let connection = Arc::clone(connection);
-                            let req = request.clone();
 
                             futures.push(tokio::spawn(async move {
                                 let mut conn = connection.lock().await;
-                                let result = conn.send_request_vote(req).await;
+                                let result = conn.send_request_vote(request).await;
                                 (peer_id, result)
                             }));
                         }

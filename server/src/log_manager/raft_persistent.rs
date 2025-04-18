@@ -4,21 +4,12 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Represents the persistent state required by the Raft consensus algorithm
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct RaftPersistentState {
     /// Current term, increases monotonically
     pub current_term: u64,
     /// CandidateId that received vote in current term (or None)
     pub voted_for: Option<u32>,
-}
-
-impl Default for RaftPersistentState {
-    fn default() -> Self {
-        Self {
-            current_term: 0,
-            voted_for: None,
-        }
-    }
 }
 
 /// Manages persistence of Raft state using sled
