@@ -434,6 +434,10 @@ impl RaftSession {
                         }
                     }
 
+                    if majority == 0 {
+                        term = request.term;
+                    }
+
                     if success_count >= majority {
                         if let Err(e) = vote_resp_tx.send((true, term)) {
                             error!("Failed to send vote responses: {}", e);
