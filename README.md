@@ -9,6 +9,7 @@ It provides a scalable, partition-based architecture with support for basic key-
 ## Architecture
 
 ![architecture](fig/architecture.jpg)
+![raft](fig/Raft.jpg)
 
 ## Supported Operations
 
@@ -41,17 +42,57 @@ cargo run --release --bin server -- [OPTIONS]
 
 #### Server Parameters
 
-- `--node-id <NODE_ID>`             Id of the current node [default: 0]
-- `--client-listen-addr <CLIENT_LISTEN_ADDR>`      The address to listen on for client requests [default: 0.0.0.0:23000]
-- `--db-path <DB_PATH>`              Directory path for database files, e.g. `data/db/node<NODE_ID>`
-- `--log-path <LOG_PATH>`            Directory path for log files, e.g. `data/log/node<NODE_ID>`
-- `--persistent-state-path <PERSISTENT_STATE_PATH>`  Directory path for persistent state files, e.g. `data/state/node<NODE_ID>`
-- `--manager-addr <MANAGER_ADDR>`    Address of the manager [default: 0.0.0.0:24000]
-- `--peer-replica-addr <PEER_REPLICA_ADDR>`  Address of the peer replicas
-- `--peer-listen-addr <PEER_LISTEN_ADDR>`  Address to listen on for peer replicas
-- `--persistence`                    Enable database persistence
-- `--batch-size <BATCH_SIZE>`        Batch size for write operations before flushing to disk
-- `--batch-timeout <BATCH_TIMEOUT>`  Timeout in milliseconds before a batch is flushed even if not full
+- `--partition-id <PARTITION_ID>`
+  - Partition ID of the current node [default: 0]
+  - Specifies which data partition this server instance manages
+
+- `--replica-id <REPLICA_ID>`
+  - Replica ID of the current node [default: 0]
+  - Identifies this server within its replica set for consensus
+
+- `-c, --client-listen-addr <CLIENT_LISTEN_ADDR>`
+  - The address to listen on for client requests [default: 0.0.0.0:23000]
+  - Endpoint where clients connect to issue queries and commands
+
+- `-p, --peer-listen-addr <PEER_LISTEN_ADDR>`
+  - The address to listen on for replica peer communication [default: 0.0.0.0:25000]
+  - Used for Raft consensus protocol traffic between replicas
+
+- `-d, --db-path <DB_PATH>`
+  - Directory path for database files
+  - Example: `data/db/partition<PARTITION_ID>/replica<REPLICA_ID>`
+
+- `--log-path <LOG_PATH>`
+  - Directory path for Raft log files
+  - Example: `data/log/partition<PARTITION_ID>/replica<REPLICA_ID>`
+
+- `--persistent-state-path <PERSISTENT_STATE_PATH>`
+  - Directory path for Raft persistent state files
+  - Example: `data/state/partition<PARTITION_ID>/replica<REPLICA_ID>`
+
+- `--manager-addr <MANAGER_ADDR>`
+  - Address of the cluster manager [default: 0.0.0.0:24000]
+  - Used for coordination and discovery
+
+- `--peer-replica-addr <PEER_REPLICA_ADDR>`
+  - Comma-separated addresses of peer replicas [default: ""]
+  - Format: `<replica_id>:<host>:<port>,<replica_id>:<host>:<port>,...`
+
+- `--persistence`
+  - Enable database persistence
+  - When enabled, data is stored on disk; otherwise data exists only in memory
+
+- `--batch-size <BATCH_SIZE>`
+  - Batch size for write operations before flushing to disk
+  - Larger values improve throughput at the cost of potential data loss on crash
+
+- `--batch-timeout <BATCH_TIMEOUT>`
+  - Timeout in milliseconds before a batch is flushed even if not full
+  - Ensures writes are not delayed too long when traffic is light
+
+- `--log-seg-entry-size <LOG_SEG_ENTRY_SIZE>`
+  - Maximum size in bytes of each log segment file [default: 1048576]
+  - Controls when new log segment files are created for better manageability
 
 ### Running the Manager
 
@@ -61,10 +102,28 @@ cargo run --release --bin manager -- [OPTIONS]
 
 #### Manager Parameters
 
-- `--listen-addr <LISTEN_ADDR>`  The address to listen on [default: 0.0.0.0:24000]
-- `--server_addrs <SERVERS>`          Comma-separated list of server addresses
-- `--tables <TABLES>`            Table configurations in format: table1=1000000,table2=2000000
-- `--server-rf <SERVER_RF>`      Replication factor for the server [default: 3]
+- `--listen-addr <LISTEN_ADDR>`
+  - The address for the manager service to listen on [default: 0.0.0.0:24000]
+  - Central endpoint that servers and clients connect to for coordination
+
+- `--server-addrs <SERVER_ADDRS>`
+  - Comma-separated list of KV server addresses
+  - Format: `<host1>:<port1>,<host2>:<port2>,...`
+  - Used to establish the initial cluster configuration
+
+- `--tables <TABLES>`
+  - Table configurations in format: table1=1000000,table2=2000000
+  - Numbers represent the key space size for each table
+  - Controls how data is partitioned across the cluster
+
+- `--server-rf <SERVER_RF>`
+  - The replication factor of a partition [default: 3]
+  - Determines how many replicas exist for each data partition
+  - Higher values increase fault tolerance but reduce write performance
+
+- `--backer-path <BACKER_PATH>`
+  - Path to durable storage directory under ./data/ (optional)
+  - Enables persistent storage of cluster metadata and configuration
 
 ### Running the Client (Terminal Interaction)
 
@@ -96,7 +155,3 @@ The client provides an interactive terminal where you can:
 4. Toggle timing with `time`
 5. Clear the screen with `clear`
 6. Exit with `exit` or `quit`
- 
-## TODO List
-
-- fix possible test bugs
