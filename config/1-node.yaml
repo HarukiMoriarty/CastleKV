@@ -1,0 +1,73 @@
+# Server Configuration File
+# This configuration file defines the settings for a single-node server instance.
+
+# =====================================
+# Node Identity Configuration
+# =====================================
+
+# Partition ID of the current node (0-based)
+# This identifies which data partition this node is responsible for
+partition_id: 0
+
+# Replica ID of the current node (0-based)
+# In a multi-replica setup, this distinguishes between replicas of the same partition
+replica_id: 0
+
+# =====================================
+# Network Configuration
+# =====================================
+
+# Address for client connections
+# Format: IP:PORT (0.0.0.0 means listen on all interfaces)
+client_listen_addr: "0.0.0.0:23000"
+
+# Address for peer replica connections
+# Used for replication traffic between nodes in the same partition
+# peer_listen_addr: "0.0.0.0:25000"
+
+# Address of the manager node
+# The manager coordinates cluster-wide operations
+manager_addr: "0.0.0.0:24000"
+
+# Addresses of peer replicas (comma-separated)
+# Each entry maps a replica ID to its address
+# Leave empty for a single node deployment
+peer_replica_addr: {}
+
+# =====================================
+# Storage Configuration
+# =====================================
+
+# Enable persistent storage
+# When true, data is persisted to disk; when false, data exists only in memory
+persistence_enabled: true
+
+# Path to the database files directory
+# Required when persistence_enabled is true
+db_path: "data/db"
+
+# Path to the log files directory
+# Required when persistence_enabled is true
+log_path: "data/log"
+
+# Path to store persistent state files
+# Required when persistence_enabled is true
+persistent_state_path: "data/state"
+
+# Size of each log segment entry in bytes
+# Larger values may improve performance but require more memory
+log_seg_entry_size: 1048576  # 1MB (1024 * 1024)
+
+# =====================================
+# Performance Tuning
+# =====================================
+
+# Maximum number of write operations to batch before flushing to disk
+# Required when persistence_enabled is true
+# Higher values can improve performance but increase risk of data loss on crash
+batch_size: 100
+
+# Timeout in milliseconds before a batch is flushed even if not full
+# Required when persistence_enabled is true
+# Lower values reduce latency but may impact throughput
+batch_timeout_ms: 1000

@@ -1,12 +1,16 @@
+use anyhow::{ensure, Context, Result};
+use clap::Parser;
+use common::NodeId;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     path::PathBuf,
 };
 
-use common::NodeId;
-
 /// Server configuration parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServerConfig {
     /// The partition id of current server
     pub partition_id: NodeId,
@@ -85,9 +89,89 @@ impl ServerConfig {
     pub fn builder() -> ServerConfigBuilder {
         ServerConfigBuilder::default()
     }
+
+    /// Load configuration from a YAML file
+    pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
+        Self::from_yaml_str(&content)
+    }
+
+    /// Parse configuration from a YAML string
+    pub fn from_yaml_str(yaml_str: &str) -> Result<Self> {
+        let config: Self =
+            serde_yaml::from_str(yaml_str).context("Failed to parse YAML configuration")?;
+        config.validate()
+    }
+
+    /// Validate the configuration
+    pub fn validate(self) -> Result<Self> {
+        // Add validation checks
+        ensure!(
+            !self.client_listen_addr.is_empty(),
+            "client_listen_addr must not be empty"
+        );
+
+        ensure!(
+            !self.peer_listen_addr.is_empty(),
+            "peer_listen_addr must not be empty"
+        );
+
+        ensure!(
+            !self.manager_addr.is_empty(),
+            "manager_addr must not be empty"
+        );
+
+        // If persistence is enabled, certain paths should be set
+        if self.persistence_enabled {
+            ensure!(
+                self.db_path.is_some(),
+                "db_path must be set when persistence is enabled"
+            );
+
+            ensure!(
+                self.log_path.is_some(),
+                "log_path must be set when persistence is enabled"
+            );
+
+            ensure!(
+                self.persistent_state_path.is_some(),
+                "persistent_state_path must be set when persistence is enabled"
+            );
+        }
+
+        // Validate that log_seg_entry_size is reasonable
+        ensure!(
+            self.log_seg_entry_size > 0,
+            "log_seg_entry_size must be greater than 0"
+        );
+
+        Ok(self)
+    }
+
+    /// Save configuration to a YAML file
+    pub fn to_yaml_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let yaml =
+            serde_yaml::to_string(self).context("Failed to serialize configuration to YAML")?;
+        fs::write(&path, yaml)
+            .with_context(|| format!("Failed to write config to file: {:?}", path.as_ref()))?;
+        Ok(())
+    }
+
+    /// Override configuration values from command line arguments
+    pub fn override_from_args(&mut self, args: &ServerArgs) -> Result<()> {
+        if let Some(id) = args.partition_id {
+            self.partition_id = NodeId(id);
+        }
+
+        if let Some(id) = args.replica_id {
+            self.replica_id = NodeId(id);
+        }
+
+        Ok(())
+    }
 }
 
-/// Builder for creating ServerConfig with custom values
 #[derive(Default)]
 pub struct ServerConfigBuilder {
     config: ServerConfig,
@@ -213,7 +297,30 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Load configuration from a YAML file
+    pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let config = ServerConfig::from_yaml_file(path)?;
+        Ok(Self { config })
+    }
+
     pub fn build(self) -> ServerConfig {
         self.config
     }
+}
+
+// Command line arguments using clap
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct ServerArgs {
+    /// Path to the YAML config file
+    #[clap(long, short, help = "Config yaml path")]
+    pub config: String,
+
+    /// Partition ID of the server
+    #[arg(long, short, help = "Partition id of the current node")]
+    pub partition_id: Option<u32>,
+
+    /// Replica ID of the server
+    #[arg(long, short, help = "Replica id of the current node")]
+    pub replica_id: Option<u32>,
 }
