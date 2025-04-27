@@ -1,0 +1,27 @@
+# Node 2 Configuration
+# This is the configuration for the second node in a two-node deployment.
+
+# Node Identity Configuration
+partition_id: 0          # Different partition from node 1
+replica_id: 1            # Same replica level
+
+# Network Configuration
+client_listen_addr: "0.0.0.0:23001"
+peer_listen_addr: "0.0.0.0:25001"
+manager_addr: "0.0.0.0:24000"
+
+# Peer replica addresses - maps replica IDs to their addresses
+# In this case, node 2 connects to node 1
+peer_replica_addr:
+  0: "0.0.0.0:25000"  # Address of node 1 (modify with actual IP)
+
+# Storage Configuration
+persistence_enabled: true
+db_path: "data/db2"
+log_path: "data/log2"
+persistent_state_path: "data/state2"
+log_seg_entry_size: 1048576  # 1MB
+
+# Performance Tuning
+batch_size: 100
+batch_timeout_ms: 1000
