@@ -327,7 +327,7 @@ fn handle_scan_results(
     // Determine overall status
     let any_aborted = cmd_results
         .iter()
-        .any(|res| res.status == Status::Aborted.into());
+        .any(|res| res.status == Status::Aborted as i32);
 
     if any_aborted {
         Ok("Aborted".to_string())

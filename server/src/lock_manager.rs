@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
+use crate::metrics::{LOCK_ACQUISITION_DURATION, LOCK_RELEASE_DURATION};
+
 /// Lock modes
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LockMode {
@@ -343,6 +345,10 @@ impl LockManager {
                     lock_requests,
                     resp_tx,
                 } => {
+                    let _timer = LOCK_ACQUISITION_DURATION
+                        .with_label_values(&["combined", "multi-key"])
+                        .start_timer();
+
                     debug!(
                         "Lock request: command {:?} requesting {:?}",
                         cmd_id, lock_requests
@@ -412,6 +418,10 @@ impl LockManager {
                 }
 
                 LockManagerMessage::ReleaseLocks { cmd_id } => {
+                    let _timer = LOCK_RELEASE_DURATION
+                        .with_label_values(&["combined", "multikey"])
+                        .start_timer();
+
                     debug!("Releasing all locks for command {cmd_id:?}");
 
                     if let Some(cmd_acquired_keys) = self.cmd_acquired_keys.remove(&cmd_id) {

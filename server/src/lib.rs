@@ -2,8 +2,10 @@ pub mod config;
 pub mod database;
 mod executor;
 mod gateway;
+mod http;
 mod lock_manager;
 pub mod log_manager;
+mod metrics;
 pub mod plan;
 pub mod storage;
 
@@ -15,6 +17,7 @@ use gateway::GatewayService;
 use lock_manager::LockManager;
 use log_manager::LogManager;
 use rpc::manager::{manager_service_client::ManagerServiceClient, RegisterServerRequest};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use storage::Storage;
 use tokio::sync::mpsc;
@@ -150,6 +153,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<(), Box<dyn std::error:
     // Start gateway (gRPC server)
     let addr = config.client_listen_addr.parse()?;
     let gateway = GatewayService::new(executor_tx);
+
+    // Start http server
+    let metrics_addr: SocketAddr = "0.0.0.0:8080".parse()?;
+    tokio::spawn(async move {
+        if let Err(e) = http::start_metrics_server(metrics_addr).await {
+            error!("Metrics server error: {e}");
+        }
+    });
 
     info!("Starting gateway server on {}", addr);
     tonic::transport::Server::builder()

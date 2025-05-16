@@ -310,7 +310,7 @@ fn format_result(result: anyhow::Result<Vec<CommandResult>>, key_len: Option<usi
         // Determine overall command status
         let any_aborted = cmd_results
             .iter()
-            .any(|res| res.status == Status::Aborted.into());
+            .any(|res| res.status == Status::Aborted as i32);
 
         output.push(if any_aborted {
             "ABORTED".to_owned()
