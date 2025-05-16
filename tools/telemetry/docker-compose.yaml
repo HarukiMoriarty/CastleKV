@@ -1,0 +1,42 @@
+configs:
+  prometheus:
+    file: ./prometheus.yml
+
+volumes:
+  castlekv-prometheus:
+
+services:
+  prometheus:
+    restart: always
+    image: prom/prometheus:latest
+    configs:
+      - source: prometheus
+        target: /etc/prometheus/prometheus.yml
+    ports:
+      - 9090:9090
+    volumes:
+      - castlekv-prometheus:/prometheus
+
+  pushgateway:
+    restart: always
+    image: prom/pushgateway:latest
+    ports:
+      - 9091:9091
+
+  # Username: admin
+  # Password: 12345
+  grafana:
+    restart: always
+    image: grafana/grafana:latest
+    ports:
+      - 3000:3000
+
+  jaeger:
+    restart: always
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - 16686:16686
+      - 4317:4317
+      - 4318:4318
