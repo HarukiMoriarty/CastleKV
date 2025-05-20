@@ -1,4 +1,4 @@
-# Distributed Key-Value Store
+# CastleKV: A Developing Distributed Key-Value Store System
 
 ## Overview
 
