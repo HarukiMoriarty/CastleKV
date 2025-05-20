@@ -253,7 +253,10 @@ dependencies = [
  "anyhow",
  "clap",
  "common",
+ "histogram",
+ "rand 0.9.1",
  "rpc",
+ "serde_json",
  "tokio",
  "tonic 0.13.0",
  "tracing",
@@ -764,6 +767,15 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "histogram"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95aebe0dec9a429e3207e5e34d97f2a7d1064d5ee6d8ed13ce0a26456de000ae"
+dependencies = [
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "home"
