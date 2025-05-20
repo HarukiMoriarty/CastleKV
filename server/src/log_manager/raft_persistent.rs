@@ -46,7 +46,7 @@ impl PersistentStateManager {
 
     fn persist(&self) -> io::Result<()> {
         confy::store_path(&self.config_name, self.state)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         debug!(
             "Persisted state: term={}, voted_for={:?}",
