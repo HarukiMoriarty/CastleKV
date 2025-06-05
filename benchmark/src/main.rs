@@ -1,25 +1,11 @@
 use clap::Parser;
 use std::fmt::Display;
-use std::io::{self, BufRead};
 use tracing::error;
 
+use benchmark::config::{Config, WorkloadType};
+use benchmark::workload::{RandomWorkload, Workload};
 use common::{extract_key, form_key, init_tracing, set_default_rust_log, Session};
 use rpc::gateway::{CommandResult, Status};
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    #[arg(
-        long,
-        short,
-        default_value = "0.0.0.0:24000",
-        help = "The address to connect to."
-    )]
-    connect_addr: String,
-
-    #[arg(long, short, help = "Key length, enable if key length is fixed")]
-    key_len: Option<usize>,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,19 +14,27 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // Parse command line arguments
-    let cli = Cli::parse();
+    let config = Config::parse();
+
+    // Generate workload
+    let mut workload: Box<dyn Workload + Send> = match &config.workload {
+        WorkloadType::Random(random_cfg) => Box::new(RandomWorkload::new(
+            config.key_range,
+            random_cfg.rw_ratio,
+            random_cfg.seed,
+        )),
+        _ => {
+            unimplemented!("Only random workload is implemented so far.");
+        }
+    };
 
     // Connect to the server
-    let address = format!("http://{}", cli.connect_addr);
+    let address = format!("http://{}", config.connect_addr);
     let mut session = Session::remote("stdI/O", address).await?;
 
-    // Process commands from stdin
-    let stdin = io::stdin();
-    let reader = stdin.lock();
-
-    for line in reader.lines() {
-        let line = line?;
-        let tokens = tokenize(&line);
+    for _ in 0..config.command_count.unwrap_or(1) {
+        let cmd = workload.next_command().await.unwrap();
+        let tokens = tokenize(&cmd);
         if tokens.is_empty() || tokens[0].is_empty() {
             continue;
         }
@@ -51,13 +45,9 @@ async fn main() -> anyhow::Result<()> {
                     error!("PUT/SCAN/SWAP requires 2 arguments: <key> <value>");
                     continue;
                 }
-                let output = execute_command(
-                    &mut session,
-                    &tokens[0].to_uppercase(),
-                    &tokens[1..],
-                    cli.key_len,
-                )
-                .await;
+                let output =
+                    execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..], None)
+                        .await;
                 println!("{}", output);
             }
             "GET" | "DELETE" => {
@@ -65,13 +55,9 @@ async fn main() -> anyhow::Result<()> {
                     error!("{} requires 1 argument: <key>", tokens[0].to_uppercase());
                     continue;
                 }
-                let output = execute_command(
-                    &mut session,
-                    &tokens[0].to_uppercase(),
-                    &tokens[1..],
-                    cli.key_len,
-                )
-                .await;
+                let output =
+                    execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..], None)
+                        .await;
                 println!("{}", output);
             }
             "STOP" => {
@@ -79,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             _ => {
-                error!("Unknown command: {}", line);
+                error!("Unknown command: {}", cmd);
             }
         }
     }

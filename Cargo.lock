@@ -260,8 +260,10 @@ name = "benchmark"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "common",
+ "rand 0.9.1",
  "rpc",
  "tokio",
  "tonic 0.13.0",
