@@ -34,7 +34,7 @@ impl Segment {
     /// * `entry` - The log entry to append
     pub fn append(&mut self, entry: &LogEntry) -> io::Result<()> {
         let data =
-            bincode::serialize(entry).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            bincode::serialize(entry).map_err(io::Error::other)?;
         self.file.write_all(&data)?;
         // Use fsync to ensure data is safely persisted
         self.file.sync_data()?;
@@ -86,7 +86,7 @@ impl RaftLog {
         // Check for existing segments
         let log_pattern = format!("{}/raft_log_segment_*.log", base_path);
         let mut existing_segments: Vec<_> = glob::glob(&log_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .map_err(io::Error::other)?
             .filter_map(Result::ok)
             .collect();
 
