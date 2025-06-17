@@ -10,6 +10,7 @@ use crate::config::ServerConfig;
 use crate::database::KeyValueDb;
 use crate::lock_manager::{LockManagerMessage, LockManagerSender, LockMode};
 use crate::log_manager::{AppendLogResult, LogManagerMessage, LogManagerSender};
+use crate::metrics::COMMAND_DURATION;
 use crate::plan::Plan;
 use common::CommandId;
 use rpc::gateway::Operation;
@@ -70,6 +71,10 @@ impl Executor {
                         while let Some(command) = stream.next().await {
                             match command {
                                 Ok(mut cmd) => {
+                                    let _timer = COMMAND_DURATION
+                                        .with_label_values(&[] as &[&str])
+                                        .start_timer();
+
                                     debug!("Command details: {:?}", cmd);
 
                                     // Generate unique monotonical increasing command id

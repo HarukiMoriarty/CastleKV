@@ -404,7 +404,7 @@ impl Session {
             match rx_opt.next().await {
                 Some(Ok(result)) => {
                     // Check if we need to switch to a different leader
-                    if result.status == Status::Leaderswitch.into() {
+                    if result.status == Status::Leaderswitch as i32 {
                         if retry_count >= MAX_RETRIES {
                             bail!("Max retries exceeded for leader switch");
                         }

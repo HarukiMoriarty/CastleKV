@@ -1,3 +1,3 @@
-mod config;
-mod metrics;
-mod workload;
+pub mod config;
+pub mod metrics;
+pub mod workload;
