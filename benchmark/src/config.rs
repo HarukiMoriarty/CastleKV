@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "KVClient", version, about = "A benchmark client for KV store")]
 pub struct Config {
     #[arg(
@@ -9,6 +9,9 @@ pub struct Config {
         help = "The address to connect to."
     )]
     pub connect_addr: String,
+
+    #[arg(long, default_value = "1", help = "Number of parallel clients")]
+    pub num_clients: usize,
 
     #[arg(long, help = "Number of commands to execute (exclusive with duration)")]
     pub command_count: Option<usize>,
@@ -30,7 +33,7 @@ pub struct Config {
     pub workload: WorkloadType,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum WorkloadType {
     #[command(name = "random", about = "Random GET/PUT workload")]
     Random(RandomConfig),
@@ -42,7 +45,7 @@ pub enum WorkloadType {
     Tpcc(TpccConfig),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct RandomConfig {
     #[arg(
         long,
@@ -55,13 +58,13 @@ pub struct RandomConfig {
     pub seed: u64,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct YcsbConfig {
     #[arg(long, default_value = "A", help = "YCSB workload type (A-F)")]
     pub workload_type: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct TpccConfig {
     #[arg(long, default_value = "1", help = "Number of warehouses")]
     pub warehouses: usize,

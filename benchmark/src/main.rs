@@ -1,8 +1,11 @@
 use clap::Parser;
 use std::fmt::Display;
-use tracing::error;
+use std::sync::Arc;
+use tokio::time::{sleep, Duration, Instant};
+use tracing::{debug, error};
 
 use benchmark::config::{Config, WorkloadType};
+use benchmark::metrics::BenchmarkResult;
 use benchmark::workload::{RandomWorkload, Workload};
 use common::{extract_key, form_key, init_tracing, set_default_rust_log, Session};
 use rpc::gateway::{CommandResult, Status};
@@ -16,21 +19,56 @@ async fn main() -> anyhow::Result<()> {
     // Parse command line arguments
     let config = Config::parse();
 
-    // Generate workload
+    let metrics = Arc::new(BenchmarkResult::default());
+
+    // Spawn reporter task
+    {
+        let metrics = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            let mut prev = metrics.snapshot(Duration::from_secs(0));
+            let start = Instant::now();
+            loop {
+                sleep(Duration::from_secs(1)).await;
+                let elapsed = start.elapsed();
+                let snapshot = metrics.snapshot(elapsed);
+                snapshot.show_diff(&prev);
+                prev = snapshot;
+            }
+        });
+    }
+
+    let mut handles = Vec::new();
+    for i in 0..config.num_clients {
+        let config = config.clone();
+        let metrics = Arc::clone(&metrics);
+        handles.push(tokio::spawn(async move {
+            run_client(i, &config, metrics).await;
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    Ok(())
+}
+
+/// Start single client
+async fn run_client(thread_id: usize, config: &Config, metrics: Arc<BenchmarkResult>) {
+    // Create per-thread workload
     let mut workload: Box<dyn Workload + Send> = match &config.workload {
-        WorkloadType::Random(random_cfg) => Box::new(RandomWorkload::new(
+        WorkloadType::Random(cfg) => Box::new(RandomWorkload::new(
             config.key_range,
-            random_cfg.rw_ratio,
-            random_cfg.seed,
+            cfg.rw_ratio,
+            cfg.seed,
         )),
-        _ => {
-            unimplemented!("Only random workload is implemented so far.");
-        }
+        _ => unimplemented!(),
     };
 
     // Connect to the server
     let address = format!("http://{}", config.connect_addr);
-    let mut session = Session::remote("stdI/O", address).await?;
+    let session_name = format!("benchmark-{}", thread_id);
+    let mut session = Session::remote(&session_name, address).await.unwrap();
 
     for _ in 0..config.command_count.unwrap_or(1) {
         let cmd = workload.next_command().await.unwrap();
@@ -39,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
+        let start_time = Instant::now();
         match tokens[0].to_uppercase().as_str() {
             "PUT" | "SCAN" | "SWAP" => {
                 if tokens.len() != 3 {
@@ -48,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 let output =
                     execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..], None)
                         .await;
-                println!("{}", output);
+                debug!("{}", output);
             }
             "GET" | "DELETE" => {
                 if tokens.len() != 2 {
@@ -58,19 +97,21 @@ async fn main() -> anyhow::Result<()> {
                 let output =
                     execute_command(&mut session, &tokens[0].to_uppercase(), &tokens[1..], None)
                         .await;
-                println!("{}", output);
+                debug!("{}", output);
             }
             "STOP" => {
-                println!("STOP");
+                debug!("STOP");
                 break;
             }
             _ => {
                 error!("Unknown command: {}", cmd);
             }
         }
-    }
 
-    Ok(())
+        let elasped = start_time.elapsed();
+        metrics.inc_finished_cmds();
+        metrics.record_latency(elasped);
+    }
 }
 
 /// Split a line into tokens by whitespace
