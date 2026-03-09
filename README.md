@@ -2,8 +2,6 @@
 
 ## Overview
 
-This project comes from course project of CS739 Distributed Systems at UW Madison. 
-
 It provides a scalable, partition-based architecture with support for basic key-value operations across multiple tables. The system features one-shot ACID transaction properties and supports Raft consensus protocol for fault-tolerant replicas.
 
 ## Architecture
